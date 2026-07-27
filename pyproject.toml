@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.11"
 dependencies = [
+    "gradio>=6.20.0",
     "numpy>=2.4.6",
     "pandas>=3.0.5",
     "pillow>=12.3.0",
