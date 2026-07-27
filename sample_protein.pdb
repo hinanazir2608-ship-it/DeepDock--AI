@@ -1,0 +1,37 @@
+REMARK  Sample protein binding site for DeepDock-AI testing
+REMARK  Simplified active site of SARS-CoV-2 Main Protease (3CLpro)
+REMARK  Binding site centroid approximately at: X=10.0, Y=5.0, Z=20.0
+ATOM      1  N   THR A  25      10.123   4.567  19.234  1.00 20.00           N
+ATOM      2  CA  THR A  25      10.456   5.012  20.567  1.00 20.00           C
+ATOM      3  C   THR A  25      11.234   4.345  21.456  1.00 20.00           C
+ATOM      4  O   THR A  25      11.567   3.234  21.123  1.00 20.00           O
+ATOM      5  N   HIS A  41       9.012   5.678  21.234  1.00 20.00           N
+ATOM      6  CA  HIS A  41       8.789   6.234  22.456  1.00 20.00           C
+ATOM      7  C   HIS A  41       9.456   7.123  23.234  1.00 20.00           C
+ATOM      8  O   HIS A  41      10.234   6.789  23.890  1.00 20.00           O
+ATOM      9  N   CYS A 145      10.890   5.456  18.567  1.00 20.00           N
+ATOM     10  CA  CYS A 145      11.234   6.012  17.456  1.00 20.00           C
+ATOM     11  C   CYS A 145      10.678   7.234  16.890  1.00 20.00           C
+ATOM     12  O   CYS A 145       9.789   7.678  17.345  1.00 20.00           O
+ATOM     13  N   GLU A 166       8.901   4.234  20.567  1.00 20.00           N
+ATOM     14  CA  GLU A 166       8.456   3.678  21.789  1.00 20.00           C
+ATOM     15  C   GLU A 166       9.123   2.567  22.456  1.00 20.00           C
+ATOM     16  O   GLU A 166      10.234   2.345  22.123  1.00 20.00           O
+ATOM     17  N   PHE A 140      12.345   4.890  20.123  1.00 20.00           N
+ATOM     18  CA  PHE A 140      13.012   5.456  21.234  1.00 20.00           C
+ATOM     19  C   PHE A 140      12.567   6.678  21.890  1.00 20.00           C
+ATOM     20  O   PHE A 140      11.456   7.012  21.567  1.00 20.00           O
+ATOM     21  N   LEU A 141      12.678   3.789  19.456  1.00 20.00           N
+ATOM     22  CA  LEU A 141      13.456   3.234  18.345  1.00 20.00           C
+ATOM     23  C   LEU A 141      14.567   4.012  17.789  1.00 20.00           C
+ATOM     24  O   LEU A 141      14.890   5.123  18.123  1.00 20.00           O
+ATOM     25  N   ASN A 142       7.890   5.890  19.234  1.00 20.00           N
+ATOM     26  CA  ASN A 142       7.456   6.678  18.123  1.00 20.00           C
+ATOM     27  C   ASN A 142       8.234   7.890  17.789  1.00 20.00           C
+ATOM     28  O   ASN A 142       9.345   7.789  17.345  1.00 20.00           O
+HETATM   29  C1  LIG A 301      10.012   5.123  20.012  1.00 30.00           C
+HETATM   30  C2  LIG A 301      10.678   5.789  21.234  1.00 30.00           C
+HETATM   31  N1  LIG A 301       9.456   6.234  19.456  1.00 30.00           N
+HETATM   32  O1  LIG A 301      11.234   4.789  20.678  1.00 30.00           O
+HETATM   33  C3  LIG A 301       9.890   4.456  21.567  1.00 30.00           C
+END

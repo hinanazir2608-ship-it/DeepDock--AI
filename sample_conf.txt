@@ -1,0 +1,14 @@
+# Sample grid config for DeepDock-AI (AutoDock-Vina format)
+# Binding site: SARS-CoV-2 Main Protease active site
+
+center_x = 10.0
+center_y = 5.0
+center_z = 20.0
+
+size_x = 22
+size_y = 22
+size_z = 22
+
+exhaustiveness = 8
+num_modes = 9
+energy_range = 3
