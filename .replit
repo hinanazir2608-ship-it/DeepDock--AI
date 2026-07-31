@@ -12,15 +12,6 @@ env = { "CI" = "true" }
 runButton = "Project"
 
 [[workflows.workflow]]
-name = "Project"
-mode = "parallel"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "DeepDock-AI"
-
-[[workflows.workflow]]
 name = "DeepDock-AI"
 author = "agent"
 
@@ -32,6 +23,68 @@ waitForPort = 5000
 [workflows.workflow.metadata]
 outputType = "webview"
 
+[[workflows.workflow]]
+name = "artifacts/api-server: DeepDock-AI"
+author = "agent"
+mode = "sequential"
+
+[workflows.workflow.metadata]
+outputType = "webview"
+artifactId = "3B4_FFSkEVBkAeYMFRJ2e"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd /home/runner/workspace && streamlit run app.py --server.port 5000"
+cwd = "./artifacts/api-server"
+waitForPort = 5000
+ensurePreviewReachable = "/"
+router = "path"
+
+[workflows.workflow.tasks.env]
+PORT = "5000"
+
+[[workflows.workflow]]
+name = "artifacts/api-server: API Server"
+author = "agent"
+mode = "sequential"
+
+[workflows.workflow.metadata]
+outputType = "webview"
+artifactId = "3B4_FFSkEVBkAeYMFRJ2e"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/api-server run dev"
+cwd = "./artifacts/api-server"
+waitForPort = 8080
+ensurePreviewReachable = "/"
+router = "path"
+
+[workflows.workflow.tasks.env]
+PORT = "8080"
+
+[[workflows.workflow]]
+name = "artifacts/mockup-sandbox: Component Preview Server"
+author = "agent"
+mode = "sequential"
+
+[workflows.workflow.metadata]
+outputType = "webview"
+artifactId = "XegfDyZt7HqfW2Bb8Ghoy"
+isCanvasWorkflow = true
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/mockup-sandbox run dev"
+cwd = "./artifacts/mockup-sandbox"
+waitForPort = 8081
+ensurePreviewReachable = "/"
+router = "path"
+
+[workflows.workflow.tasks.env]
+PORT = "8081"
+BASE_PATH = "/__mockup"
+
 [agent]
 stack = "PNPM_WORKSPACE"
 expertMode = true
@@ -42,4 +95,4 @@ timeoutMs = 20000
 
 [nix]
 channel = "stable-25_05"
-packages = ["arrow-cpp", "cairo", "catch2", "comic-neue", "coordgenlibs", "eigen", "freetype", "glibcLocales", "inchi", "lcms2", "libimagequant", "libjpeg", "libjpeg_turbo", "libpng", "libtiff", "libwebp", "libxcrypt", "maeparser", "openjpeg", "pkg-config", "rapidjson", "tcl", "tk", "which", "xsimd", "zlib"]
+packages = ["arrow-cpp", "cairo", "catch2", "comic-neue", "coordgenlibs", "eigen", "freetype", "glibcLocales", "inchi", "lcms2", "libimagequant", "libjpeg", "libjpeg_turbo", "libpng", "libtiff", "libwebp", "libxcrypt", "maeparser", "openjpeg", "pkg-config", "rapidjson", "tcl", "tk", "which", "xsimd", "zlib", "psmisc"]

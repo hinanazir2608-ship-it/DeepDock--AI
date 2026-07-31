@@ -2,9 +2,18 @@
 headless = true
 address = "0.0.0.0"
 port = 5000
+enableCORS = false
+enableXsrfProtection = false
+maxUploadSize = 500
 
 [browser]
 gatherUsageStats = false
+serverAddress = "0.0.0.0"
+serverPort = 5000
 
 [theme]
 base = "dark"
+primaryColor = "#4FC3F7"
+backgroundColor = "#0E1117"
+secondaryBackgroundColor = "#1A1E2E"
+textColor = "#FAFAFA"
