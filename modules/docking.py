@@ -100,13 +100,15 @@ def load_gnina_model(weights_path: str = "") -> Tuple[GNINAScorer, torch.device]
     return model, device
 
 
+# modules/docking.py me _mol_to_pdbqt_str method check kar lein:
+
 def _mol_to_pdbqt_str(mol: Chem.Mol, name: str = "LIG") -> Optional[str]:
     if not MEEKO_AVAILABLE:
         print("[DEBUG] Meeko is not imported properly!")
         return None
     try:
-        # Sanitize and add Hydrogens
         mol = Chem.Mol(mol)  # Copy mol
+        mol.SetProp("_Name", str(name)) # 🔹 Preserve CID name in copy
         Chem.SanitizeMol(mol)
         mol = Chem.AddHs(mol)
 
