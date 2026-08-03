@@ -81,37 +81,37 @@ def _filter_molecule(mol_smiles_name: Tuple[str, str]) -> Optional[dict]:
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+# modules/filter.py me update karein:
+
 def run_parallel_admet_filter(
     mols: List[Chem.Mol],
     n_workers: Optional[int] = None,
 ) -> Tuple[List[Chem.Mol], List[dict]]:
-    """
-    Filter a list of RDKit Mol objects in parallel.
-
-    Returns
-    -------
-    passed_mols : list[Mol]   — molecules passing all ADMET filters
-    records     : list[dict]  — per-molecule stats (for every input mol)
-    """
     if not mols:
         return [], []
 
     n_workers = n_workers or max(1, mp.cpu_count() - 1)
 
-    # Convert mols → (SMILES, name) for pickle-safe IPC
     inputs: List[Tuple[str, str]] = []
     for i, mol in enumerate(mols):
         try:
             smi = Chem.MolToSmiles(mol)
-            name = mol.GetPropsAsDict().get("_Name", f"mol_{i}")
+            props = mol.GetPropsAsDict()
+            # 🔹 Priority to CID/ChEMBL ID
+            name = (
+                props.get("CID") or 
+                props.get("PUBCHEM_COMPOUND_CID") or 
+                props.get("CHEMBL_ID") or 
+                props.get("_Name") or 
+                f"mol_{i}"
+            )
         except Exception:
             smi, name = "", f"mol_{i}"
-        inputs.append((smi, name))
+        inputs.append((smi, str(name)))
 
     with mp.Pool(processes=n_workers) as pool:
         results = pool.map(_filter_molecule, inputs)
 
-    # Map results back to original mol objects
     passed_mols: List[Chem.Mol] = []
     records: List[dict] = []
 
@@ -120,13 +120,9 @@ def run_parallel_admet_filter(
             continue
         records.append(res)
         if res["AllPass"]:
+            # Ensure name property persists in passed RDKit object
+            mol.SetProp("_Name", str(res["name"]))
             passed_mols.append(mol)
 
     return passed_mols, records
-
-
-def compute_single_admet(mol: Chem.Mol, name: str = "") -> dict:
-    """Compute ADMET descriptors for a single molecule (no subprocess)."""
-    smiles = Chem.MolToSmiles(mol)
-    result = _filter_molecule((smiles, name or smiles[:20]))
     return result or {}
