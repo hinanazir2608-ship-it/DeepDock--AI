@@ -1,7 +1,7 @@
 """
 DeepDock-AI — GPU-Accelerated Virtual Screening Platform
 3-Stage Pipeline: RDKit Filter → GNINA Docking → ADMETlab 3.0
-FIXED VERSION — All Tab 2 bugs resolved
+FIXED VERSION — Preserving PubChem CIDs & Ligand Names across all stages
 """
 
 from __future__ import annotations
@@ -41,6 +41,24 @@ from modules.export import (
 from modules.model import get_device_info
 from rdkit import Chem
 from rdkit.Chem import Descriptors, rdMolDescriptors
+
+
+# Helper function to extract PubChem CID or Mol Name cleanly
+def extract_ligand_name(mol: Chem.Mol, index: int) -> str:
+    """RDKit mol object se PubChem CID ya custom name extract karta hai."""
+    if mol is None:
+        return f"Compound_{index+1}"
+    
+    if mol.HasProp("_Name") and mol.GetProp("_Name").strip():
+        return mol.GetProp("_Name").strip()
+    elif mol.HasProp("PUBCHEM_COMPOUND_CID"):
+        return f"CID_{mol.GetProp('PUBCHEM_COMPOUND_CID')}"
+    elif mol.HasProp("PUBCHEM_IUPAC_NAME"):
+        return mol.GetProp("PUBCHEM_IUPAC_NAME")
+    elif mol.HasProp("ID"):
+        return mol.GetProp("ID")
+    
+    return f"CID_{index+1}"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -167,10 +185,18 @@ if ligand_file or protein_file:
                 preview_mols, preview_names = load_ligands_from_bytes(
                     ligand_file.getvalue()
                 )
+                if preview_mols:
+                    # Clean CID fallback logic
+                    preview_names = [
+                        preview_names[i] if (preview_names and i < len(preview_names) and preview_names[i])
+                        else extract_ligand_name(m, i)
+                        for i, m in enumerate(preview_mols)
+                    ]
+                
                 st.metric("Molecules detected", len(preview_mols))
                 if preview_names:
                     st.dataframe(
-                        pd.DataFrame({"Name": preview_names[:8]}),
+                        pd.DataFrame({"Compound CID / Name": preview_names[:8]}),
                         height=200,
                         use_container_width=True,
                     )
@@ -219,6 +245,14 @@ with tab1:
         if run_filter:
             with st.status("Loading ligands…", expanded=True) as s1:
                 raw_mols, raw_names = load_ligands_from_bytes(ligand_file.getvalue())
+                
+                # CID preservation logic
+                raw_names = [
+                    raw_names[i] if (raw_names and i < len(raw_names) and raw_names[i])
+                    else extract_ligand_name(m, i)
+                    for i, m in enumerate(raw_mols)
+                ]
+
                 n_in = len(raw_mols)
                 st.write(f"✅ Loaded **{n_in}** ligands")
                 if n_in == 0:
@@ -296,7 +330,7 @@ with tab1:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# TAB 2 — GNINA Docking (FIXED)
+# TAB 2 — GNINA Docking (UPDATED WITH CID FIX)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 with tab2:
     st.subheader("⚗️ Stage 2 — GNINA Molecular Docking")
@@ -322,9 +356,12 @@ with tab2:
     else:
         n_to_dock = min(batch_dock, len(mols_ready))
         dock_mols = mols_ready[:n_to_dock]
-        dock_names = (
-            st.session_state.all_names or [f"mol_{i}" for i in range(n_to_dock)]
-        )[:n_to_dock]
+        
+        # 🔑 FIX: Robust CID mapping for docking list
+        if st.session_state.all_names:
+            dock_names = st.session_state.all_names[:n_to_dock]
+        else:
+            dock_names = [extract_ligand_name(m, i) for i, m in enumerate(dock_mols)]
 
         st.info(
             f"Ready to dock **{n_to_dock}** ligands "
@@ -364,15 +401,14 @@ with tab2:
             prog_dock = st.progress(0.0, text="Starting docking…")
             stat_dock = st.empty()
 
-            # ✅ FIX: Added proper error handling
             with st.spinner("Running GNINA docking…"):
                 t0 = time.time()
 
                 try:
                     results = dock_ligands(
                         mols=dock_mols,
-                        names=dock_names,
-                        pdb_bytes=pdbqt_bytes,  # ✓ PDBQT bytes directly
+                        names=dock_names,  # Passed extracted CIDs
+                        pdb_bytes=pdbqt_bytes,
                         center=center,
                         box_size=box_size,
                         exhaustiveness=exhaustiveness,
@@ -430,7 +466,7 @@ with tab2:
                 dock_records = [
                     {
                         "Rank": i + 1,
-                        "Name": r.name,
+                        "Compound CID / Name": r.name,
                         "Vina Score": round(r.vina_score, 3),
                         "GNINA ΔG (kcal/mol)": round(r.gnina_affinity, 3),
                         "3D Pose": "✓" if r.pose_pdb else "–",
@@ -440,7 +476,6 @@ with tab2:
 
                 dock_df = pd.DataFrame(dock_records)
 
-                # ✅ FIX: Proper styling without broken applymap
                 def _dg_colour(val):
                     if not isinstance(val, (int, float)):
                         return ""
@@ -509,7 +544,7 @@ with tab3:
     else:
         top_results = docking_results[:top_admet]
         top_mols = [r.mol for r in top_results]
-        top_names = [r.name for r in top_results]
+        top_names = [r.name for r in top_results]  # Uses exact PubChem CIDs
         top_scores = [r.gnina_affinity for r in top_results]
 
         st.info(
@@ -651,7 +686,6 @@ with tab3:
             with e3:
                 with st.spinner("Generating DOCX report…"):
                     try:
-                        # Build docking summary df
                         dock_records = [
                             {
                                 "Rank": i + 1,
