@@ -41,17 +41,14 @@ def export_pdb_complexes_zip(
     complex_pdbs: List[str],
     names: List[str],
     scores: List[float],
+    cids: Optional[List[str]] = None, # Optional list of PubChem CIDs
 ) -> bytes:
-    """
-    Pack all protein-ligand PDB complexes into a single ZIP file.
-    Each file: <rank>_<name>_complex.pdb with REMARK headers.
-    Returns raw ZIP bytes.
-    """
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for rank, (pdb_str, name, score) in enumerate(
             zip(complex_pdbs, names, scores), start=1
         ):
+            cid_info = cids[rank - 1] if cids and (rank - 1) < len(cids) else "N/A"
             safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
             fname = f"{rank:03d}_{safe_name}_complex.pdb"
 
@@ -59,6 +56,7 @@ def export_pdb_complexes_zip(
                 f"REMARK   DeepDock-AI Virtual Screening Result\n"
                 f"REMARK   Rank       : {rank}\n"
                 f"REMARK   Compound   : {name}\n"
+                f"REMARK   PubChem CID: {cid_info}\n"  # Added PubChem CID line
                 f"REMARK   GNINA ΔG   : {score:.3f} kcal/mol\n"
                 f"REMARK   Date       : {datetime.datetime.utcnow().strftime('%Y-%m-%d')}\n"
                 f"REMARK   Software   : AutoDock-Vina + GNINA CNN Rescoring\n"
