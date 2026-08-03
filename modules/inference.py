@@ -38,7 +38,7 @@ def _run_one_batch(
     b = _move_batch(batch, device)
     with torch.no_grad():
         if use_fp16 and device.type == "cuda":
-            with amp.autocast():
+            with torch.amp.autocast("cuda"):
                 scores = model(b["node_feats"], b["adj"], b["mask"])
         else:
             scores = model(b["node_feats"], b["adj"], b["mask"])

@@ -14,13 +14,19 @@ from rdkit.Chem.FilterCatalog import FilterCatalogParams
 
 
 # ── PAINS catalog (singleton per process) ────────────────────────────────────
-def _get_pains_catalog() -> FilterCatalog.FilterCatalog:
-    params = FilterCatalogParams()
-    params.AddCatalog(FilterCatalogParams.FilterCatalogs.PAINS_A)
-    params.AddCatalog(FilterCatalogParams.FilterCatalogs.PAINS_B)
-    params.AddCatalog(FilterCatalogParams.FilterCatalogs.PAINS_C)
-    return FilterCatalog.FilterCatalog(params)
+# ── PAINS catalog (singleton per process) ────────────────────────────────────
+_PAINS_CATALOG: Optional[FilterCatalog.FilterCatalog] = None
 
+
+def _get_pains_catalog() -> FilterCatalog.FilterCatalog:
+    global _PAINS_CATALOG
+    if _PAINS_CATALOG is None:
+        params = FilterCatalogParams()
+        params.AddCatalog(FilterCatalogParams.FilterCatalogs.PAINS_A)
+        params.AddCatalog(FilterCatalogParams.FilterCatalogs.PAINS_B)
+        params.AddCatalog(FilterCatalogParams.FilterCatalogs.PAINS_C)
+        _PAINS_CATALOG = FilterCatalog.FilterCatalog(params)
+    return _PAINS_CATALOG
 
 # ── Per-molecule filter worker (runs in subprocess) ───────────────────────────
 def _filter_molecule(mol_smiles_name: Tuple[str, str]) -> Optional[dict]:

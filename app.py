@@ -7,9 +7,10 @@ FIXED VERSION — All Tab 2 bugs resolved
 from __future__ import annotations
 import gc
 import io
+import os
+import tempfile
 import time
 from typing import List, Optional, Tuple
-
 import streamlit as st
 import pandas as pd
 import torch
@@ -221,6 +222,7 @@ with tab1:
                 n_in = len(raw_mols)
                 st.write(f"✅ Loaded **{n_in}** ligands")
                 if n_in == 0:
+                    s1.update(label="No molecules found", state="error")
                     st.error("No valid molecules found.")
                     st.stop()
                 if n_in <= 20 and enable_admet:
@@ -277,16 +279,16 @@ with tab1:
                     for c in df_filt.columns
                     if c in ("LipinskiPass", "VeberPass", "PAINSPass", "AllPass")
                 ]
-            styled_f = df_filt.style.map(_colour_pass, subset=bool_cols)
-            st.dataframe(styled_d, use_container_width=True, height=380)  # ty:ignore[unresolved-reference]
+                styled_f = df_filt.style.map(_colour_pass, subset=bool_cols)
+                st.dataframe(styled_f, use_container_width=True, height=380)
 
-            csv_filt = export_csv(df_filt)
-            st.download_button(
-                "⬇ Download Filter Report CSV",
-                csv_filt,
-                "filter_report.csv",
-                "text/csv",
-            )
+                csv_filt = export_csv(df_filt)
+                st.download_button(
+                    "⬇ Download Filter Report CSV",
+                    csv_filt,
+                    "filter_report.csv",
+                    "text/csv",
+                )
 
             st.success(
                 f"✅ {n_pass} ligands ready for docking. Proceed to **Stage 2**."
@@ -354,7 +356,7 @@ with tab2:
 
             weights_path = ""
             if weights_file:
-                tmp = "/tmp/gnina_weights.pt"
+                tmp = os.path.join(tempfile.gettempdir(), "gnina_weights.pt")
                 with open(tmp, "wb") as f:
                     f.write(weights_file.getvalue())
                 weights_path = tmp
@@ -406,82 +408,87 @@ with tab2:
                     gc.collect()
 
         # ── Show docking results ──────────────────────────────────────────────
-        if st.session_state.docking_results:
+        if st.session_state.docking_results is not None:
             results = st.session_state.docking_results
 
-            d1, d2, d3, d4 = st.columns(4)
-            d1.metric("Ligands docked", len(results))
-            if results:
-                best = min(r.gnina_affinity for r in results)
-                d2.metric("Best ΔG (kcal/mol)", f"{best:.3f}")
-                mean = sum(r.gnina_affinity for r in results) / len(results)
-                d3.metric("Mean ΔG (kcal/mol)", f"{mean:.3f}")
-                has_poses = sum(1 for r in results if r.pose_pdb)
-                d4.metric("3D poses generated", has_poses)
-
-            st.markdown("#### Docking Results Table")
-            dock_records = [
-                {
-                    "Rank": i + 1,
-                    "Name": r.name,
-                    "Vina Score": round(r.vina_score, 3),
-                    "GNINA ΔG (kcal/mol)": round(r.gnina_affinity, 3),
-                    "3D Pose": "✓" if r.pose_pdb else "–",
-                }
-                for i, r in enumerate(results)
-            ]
-
-            dock_df = pd.DataFrame(dock_records)
-
-            # ✅ FIX: Proper styling without broken applymap
-            def _dg_colour(val):
-                if not isinstance(val, (int, float)):
-                    return ""
-                if val < -10:
-                    return "color:#00C853;font-weight:bold"
-                if val < -7:
-                    return "color:#64DD17"
-                if val < -5:
-                    return "color:#FFD600"
-                return "color:#FF6D00"
-
-            styled_d = dock_df.style.map(
-                lambda val: _dg_colour(val),
-                subset=["GNINA ΔG (kcal/mol)", "Vina Score"],
-            )
-
-            st.dataframe(styled_d, use_container_width=True, height=420)
-
-            # ── PDB complex download ──────────────────────────────────────────
-            complex_pdbs = [r.complex_pdb for r in results if r.complex_pdb]
-            names_dock = [r.name for r in results if r.complex_pdb]
-            scores_dock = [r.gnina_affinity for r in results if r.complex_pdb]
-
-            if complex_pdbs:
-                zip_bytes = export_pdb_complexes_zip(
-                    complex_pdbs, names_dock, scores_dock
+            if len(results) == 0:
+                st.warning(
+                    "⚠️ Docking ran but no ligands produced valid results. Check grid center/box size or protein file."
                 )
-                ec1, ec2 = st.columns(2)
-                with ec1:
-                    st.download_button(
-                        "⬇ Download PDB Complexes (ZIP)",
-                        zip_bytes,
-                        "docked_complexes.zip",
-                        "application/zip",
-                        use_container_width=True,
-                    )
-                with ec2:
-                    st.download_button(
-                        "⬇ Download Docking CSV",
-                        export_csv(dock_df),
-                        "docking_results.csv",
-                        "text/csv",
-                        use_container_width=True,
-                    )
+            else:
+                d1, d2, d3, d4 = st.columns(4)
+                d1.metric("Ligands docked", len(results))
+                if results:
+                    best = min(r.gnina_affinity for r in results)
+                    d2.metric("Best ΔG (kcal/mol)", f"{best:.3f}")
+                    mean = sum(r.gnina_affinity for r in results) / len(results)
+                    d3.metric("Mean ΔG (kcal/mol)", f"{mean:.3f}")
+                    has_poses = sum(1 for r in results if r.pose_pdb)
+                    d4.metric("3D poses generated", has_poses)
 
-            st.success(
-                "✅ Docking complete. Proceed to **Stage 3** for ADMET analysis."
-            )
+                st.markdown("#### Docking Results Table")
+                dock_records = [
+                    {
+                        "Rank": i + 1,
+                        "Name": r.name,
+                        "Vina Score": round(r.vina_score, 3),
+                        "GNINA ΔG (kcal/mol)": round(r.gnina_affinity, 3),
+                        "3D Pose": "✓" if r.pose_pdb else "–",
+                    }
+                    for i, r in enumerate(results)
+                ]
+
+                dock_df = pd.DataFrame(dock_records)
+
+                # ✅ FIX: Proper styling without broken applymap
+                def _dg_colour(val):
+                    if not isinstance(val, (int, float)):
+                        return ""
+                    if val < -10:
+                        return "color:#00C853;font-weight:bold"
+                    if val < -7:
+                        return "color:#64DD17"
+                    if val < -5:
+                        return "color:#FFD600"
+                    return "color:#FF6D00"
+
+                styled_d = dock_df.style.map(
+                    lambda val: _dg_colour(val),
+                    subset=["GNINA ΔG (kcal/mol)", "Vina Score"],
+                )
+
+                st.dataframe(styled_d, use_container_width=True, height=420)
+
+                # ── PDB complex download ──────────────────────────────────────────
+                complex_pdbs = [r.complex_pdb for r in results if r.complex_pdb]
+                names_dock = [r.name for r in results if r.complex_pdb]
+                scores_dock = [r.gnina_affinity for r in results if r.complex_pdb]
+
+                if complex_pdbs:
+                    zip_bytes = export_pdb_complexes_zip(
+                        complex_pdbs, names_dock, scores_dock
+                    )
+                    ec1, ec2 = st.columns(2)
+                    with ec1:
+                        st.download_button(
+                            "⬇ Download PDB Complexes (ZIP)",
+                            zip_bytes,
+                            "docked_complexes.zip",
+                            "application/zip",
+                            use_container_width=True,
+                        )
+                    with ec2:
+                        st.download_button(
+                            "⬇ Download Docking CSV",
+                            export_csv(dock_df),
+                            "docking_results.csv",
+                            "text/csv",
+                            use_container_width=True,
+                        )
+
+                st.success(
+                    "✅ Docking complete. Proceed to **Stage 3** for ADMET analysis."
+                )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -497,6 +504,8 @@ with tab3:
     docking_results = st.session_state.docking_results
     if docking_results is None:
         st.info("Complete **Stage 2** first to generate docking results.")
+    elif len(docking_results) == 0:
+        st.warning("⚠️ No ligands were successfully docked in Stage 2. Go back and check your grid, box size, or protein file.")
     else:
         top_results = docking_results[:top_admet]
         top_mols = [r.mol for r in top_results]
