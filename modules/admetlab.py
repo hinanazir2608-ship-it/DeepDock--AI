@@ -261,14 +261,10 @@ def run_admet_analysis(
     mols:        List[Chem.Mol],
     names:       List[str],
     scores:      List[float],
+    cids:        Optional[List[str]] = None, # Add CID parameter
     use_api:     bool = True,
     status_text  = None,
 ) -> Tuple[pd.DataFrame, str]:
-    """
-    Run ADMET analysis. Tries ADMETlab 3.0 API first; falls back to RDKit.
-    Returns (DataFrame, source) where source is "ADMETlab3.0" or "RDKit".
-    """
-    from typing import Tuple
 
     if use_api:
         smiles_list = []
@@ -278,15 +274,13 @@ def run_admet_analysis(
             except Exception:
                 smiles_list.append("")
 
-        api_df = predict_via_admetlab3(smiles_list, names, status_text)
+        api_df = predict_via_admetlab3(smiles_list, names, cids=cids, status_text=status_text)
         if api_df is not None and not api_df.empty:
-            # Merge ΔG scores
-            api_df.insert(1, "ΔG (kcal/mol)",
-                          [round(s, 3) for s in scores[:len(api_df)]])
+            api_df.insert(1, "ΔG (kcal/mol)", [round(s, 3) for s in scores[:len(api_df)]])
             return api_df, "ADMETlab 3.0"
 
     # Fallback to RDKit
     if status_text:
         status_text.info("ADMETlab 3.0 unavailable — using RDKit ADMET descriptors.")
-    rdkit_df = predict_rdkit_admet(mols, names, scores)
+    rdkit_df = predict_rdkit_admet(mols, names, scores, cids=cids)
     return rdkit_df, "RDKit"
