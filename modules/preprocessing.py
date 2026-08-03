@@ -13,31 +13,41 @@ from rdkit.Chem import AllChem, Descriptors
 
 
 # ── Ligand SDF loading ────────────────────────────────────────────────────────
-def load_ligands_from_bytes(sdf_bytes: bytes) -> Tuple[List[Chem.Mol], List[str]]:
-    """
-    Parse an SDF file from raw bytes using SDMolSupplier.
-    Returns (mols, names) – skips invalid entries with a warning.
-    """
-    # SDMolSupplier needs a file path or stream; use ForwardSDMolSupplier for bytes
-    stream = io.BytesIO(sdf_bytes)
-    suppl  = Chem.ForwardSDMolSupplier(stream, removeHs=False, sanitize=True)
+# modules/preprocessing.py me replace karein:
 
-    mols:  List[Chem.Mol] = []
-    names: List[str]      = []
+def load_ligands_from_bytes(sdf_bytes: bytes) -> Tuple[List[Chem.Mol], List[str]]:
+    stream = io.BytesIO(sdf_bytes)
+    suppl = Chem.ForwardSDMolSupplier(stream, removeHs=False, sanitize=True)
+
+    mols: List[Chem.Mol] = []
+    names: List[str] = []
     idx = 0
 
     for mol in suppl:
         idx += 1
         if mol is None:
             continue
-        name = mol.GetPropsAsDict().get("_Name", f"ligand_{idx}").strip()
-        if not name:
+        
+        # 🔹 Extract CID or fallback to _Name
+        props = mol.GetPropsAsDict()
+        name = (
+            props.get("CID") or 
+            props.get("PUBCHEM_COMPOUND_CID") or 
+            props.get("CHEMBL_ID") or 
+            props.get("_Name") or 
+            f"ligand_{idx}"
+        )
+        name = str(name).strip()
+        if not name or name == "None":
             name = f"ligand_{idx}"
+
+        # Molecule object ke ander bhi '_Name' update rakhein
+        mol.SetProp("_Name", name)
+        
         mols.append(mol)
         names.append(name)
 
     return mols, names
-
 
 def ensure_3d_coords(mols: List[Chem.Mol]) -> List[Chem.Mol]:
     """
