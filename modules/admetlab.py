@@ -178,13 +178,11 @@ def predict_rdkit_admet(
     mols:   List[Chem.Mol],
     names:  List[str],
     scores: List[float],
+    cids:   Optional[List[str]] = None, # Add CID parameter
 ) -> pd.DataFrame:
-    """
-    Comprehensive ADMET profiling using RDKit descriptors as fallback.
-    Covers physicochemical, ADME heuristics, and flag-based toxicity.
-    """
     records = []
-    for mol, name, score in zip(mols, names, scores):
+    for idx, (mol, name, score) in enumerate(zip(mols, names, scores)):
+        cid_val = cids[idx] if cids and idx < len(cids) else "N/A"
         try:
             mw      = round(Descriptors.ExactMolWt(mol), 2)
             logp    = round(Descriptors.MolLogP(mol), 2)
@@ -218,6 +216,7 @@ def predict_rdkit_admet(
 
             records.append({
                 "Name":            name,
+                "CID":             cid_val, # Add CID to output table
                 "ΔG (kcal/mol)":  round(score, 3),
                 # Physicochemical
                 "MW":              mw,
@@ -251,7 +250,7 @@ def predict_rdkit_admet(
                 "DILI_Flag":       "Unknown",  # Requires model
             })
         except Exception as e:
-            records.append({"Name": name, "ΔG (kcal/mol)": round(score, 3),
+            records.append({"Name": name,"CID": cid_val,"ΔG (kcal/mol)": round(score, 3),
                             "Error": str(e)})
 
     return pd.DataFrame(records)
