@@ -26,7 +26,7 @@ except ImportError:
 
 try:
     import meeko
-    from meeko import MoleculePreparation, PDBQTMolecule
+    from meeko import MoleculePreparation, PDBQTWriterLegacy
     MEEKO_AVAILABLE = True
 except ImportError as e:
     print(f"[DEBUG IMPORT ERROR] Meeko import failed: {e}")
@@ -90,7 +90,7 @@ class GNINAScorer(nn.Module):
 
 
 @st.cache_resource(show_spinner="Loading GNINA scoring model…")
-def load_gnina_model(weights_path: str = "") -> Tuple[GNINAScorer, torch.device]:
+    def load_gnina_model(weights_path: str = "") -> Tuple[GNINAScorer, torch.device]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model  = GNINAScorer().to(device).eval()
     if weights_path and Path(weights_path).exists():
@@ -132,14 +132,18 @@ def _mol_to_pdbqt_str(mol: Chem.Mol, name: str = "LIG") -> Optional[str]:
             pass  # Proceed even if force field optimization fails
 
         # Modern Meeko v0.5+ method (No deprecation warnings)
-        try:
-            pdbqt_mol = PDBQTMolecule.from_rdkit(mol)
-            return pdbqt_mol.write_pdbqt_string()
-        except (ImportError, AttributeError):
-            # Legacy Fallback
-            prep = MoleculePreparation()
-            prep.prepare(mol)
-            return prep.write_pdbqt_string()
+        # Meeko v0.5+ API — write_pdbqt_string() removed; prepare() returns
+        # MoleculeSetup objects written via PDBQTWriterLegacy
+        prep = MoleculePreparation()
+        mol_setups = prep.prepare(mol)
+        if not mol_setups:
+            print(f"[DEBUG] Meeko produced no setups for {name}")
+            return None
+        pdbqt_str, is_ok, err_msg = PDBQTWriterLegacy.write_string(mol_setups[0])
+        if not is_ok:
+            print(f"[DEBUG] PDBQT write failed for {name}: {err_msg}")
+            return None
+        return pdbqt_str
 
     except Exception as e:
         print(f"[DEBUG] Meeko Conversion Exception for {name}: {e}")
