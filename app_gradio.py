@@ -7,7 +7,10 @@ import gradio as gr
 # Current directory import setup
 if os.getcwd() not in sys.path:
     sys.path.insert(0, os.getcwd())
-
+# Subfolder 'modules' ko Python path mein include karein
+modules_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "modules")
+if modules_path not in sys.path:
+    sys.path.insert(0, modules_path)
 # Aapke main modules import karein
 import admetlab
 import docking
