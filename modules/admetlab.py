@@ -86,6 +86,7 @@ def _poll_results(task_id: str, max_wait: int = 120) -> Optional[List[Dict]]:
 def predict_via_admetlab3(
     smiles_list: List[str],
     names: List[str],
+    cids: Optional[List[str]] = None,
     status_text=None,
 ) -> Optional[pd.DataFrame]:
     """
@@ -274,7 +275,7 @@ def run_admet_analysis(
             except Exception:
                 smiles_list.append("")
 
-        api_df = predict_via_admetlab3(smiles_list, names, cids=cids, status_text=status_text)
+      api_df = predict_via_admetlab3(smiles_list, names, cids=cids, status_text=status_text)
         if api_df is not None and not api_df.empty:
             api_df.insert(1, "ΔG (kcal/mol)", [round(s, 3) for s in scores[:len(api_df)]])
             return api_df, "ADMETlab 3.0"
