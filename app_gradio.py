@@ -1,4 +1,4 @@
-import os
+'''import os
 import sys
 import zipfile
 import pandas as pd
@@ -85,7 +85,6 @@ def run_deepdock_pipeline(ligand_file, protein_file, batch_size, filter_type, us
         create_results_zip(zip_file_path, csv_file_path, docked_mols, filtered_names)
         status_log += "🎉 Pipeline Executed Successfully! Download your files below.\\n"
     except Exception:
-        # Fallback Zip creation
         with zipfile.ZipFile(zip_file_path, 'w') as zipf:
             if os.path.exists(csv_file_path):
                 zipf.write(csv_file_path, arcname="screening_results.csv")
@@ -102,7 +101,6 @@ with gr.Blocks(title="DeepDock-AI Virtual Screening") as demo:
     gr.Markdown("Integrated In-Silico Molecular Docking, RDKit Filters, and ADMETlab 3.0 Profiling")
 
     with gr.Row():
-        # LEFT COLUMN: Inputs & Controls
         with gr.Column(scale=1):
             gr.Markdown("### 1. Input Files & Screening Setup")
             ligand_input = gr.File(label="Upload Ligands (.sdf)", file_types=[".sdf"])
@@ -119,28 +117,23 @@ with gr.Blocks(title="DeepDock-AI Virtual Screening") as demo:
             
             run_btn = gr.Button("🚀 Run Full DeepDock Pipeline", variant="primary")
 
-        # RIGHT COLUMN: Live Execution Log
         with gr.Column(scale=2):
             gr.Markdown("### Live Console Status")
             console_output = gr.Textbox(label="Status & Execution Log", lines=8, interactive=False)
 
     gr.Markdown("---")
     
-    # STAGE 1 OUTPUT: RDKit Filtering Table
     with gr.Accordion("📋 Stage 1 Results: RDKit Molecular Descriptors & Filters", open=True):
         stage1_table = gr.Dataframe(label="Pre-docking Molecular Properties", interactive=False)
 
-    # STAGE 3 OUTPUT: ADMET & Docking Table
     with gr.Accordion("📊 Stage 2 & 3 Results: Docking Scores & ADMETlab 3.0 Profiling", open=True):
         admet_table = gr.Dataframe(label="Docking ΔG (kcal/mol) + ADMET Properties", interactive=False)
 
-    # DOWNLOADS SECTION
     gr.Markdown("### 📥 4. Download Outputs & Report Files")
     with gr.Row():
         csv_download = gr.File(label="📄 Download Screening Results (CSV)")
         zip_download = gr.File(label="📦 Download Complete Results Package (ZIP)")
 
-    # Event Wiring
     run_btn.click(
         fn=run_deepdock_pipeline,
         inputs=[ligand_input, protein_input, batch_size, filter_type, use_admet_api],
@@ -154,4 +147,4 @@ if __name__ == "__main__":
 with open("/kaggle/working/DeepDock--AI/app_gradio.py", "w", encoding="utf-8") as f:
     f.write(gradio_code)
 
-print("✅ Upgraded app_gradio.py with Stage 1 RDKit, Stage 3 ADMET, CSV & ZIP exports successfully!")
+print("✅ app_gradio.py clean syntax rewrite completed successfully!")
