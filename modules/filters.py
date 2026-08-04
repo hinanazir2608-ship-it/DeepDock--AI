@@ -126,3 +126,9 @@ def run_parallel_admet_filter(
 
     return passed_mols, records
     return result or {}
+
+def compute_single_admet(mol: Chem.Mol, name: str = "") -> dict:
+    """Compute ADMET descriptors for a single molecule (no subprocess)."""
+    smiles = Chem.MolToSmiles(mol)
+    result = _filter_molecule((smiles, name or smiles[:20]))
+    return result or {}
