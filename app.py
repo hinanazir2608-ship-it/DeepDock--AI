@@ -628,7 +628,7 @@ with tab2:
                 bstart = b * batch_size
                 bend = min(bstart + batch_size, n_total)
                 batch_mols = all_ready_mols[bstart:bend]
-                batch_names = [extract_ligand_name(m, i) for i, m in enumerate(batch_mols)]
+                batch_names = [extract_ligand_name(m, bstart + i) for i, m in enumerate(batch_mols)]
 
                 st.markdown(f"**Batch {b + 1}/{n_batches}** — ligands {bstart + 1}–{bend}")
                 batch_progress = st.progress(0.0)
