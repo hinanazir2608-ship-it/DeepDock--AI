@@ -24,22 +24,77 @@ def run_deepdock_pipeline(ligand_file, protein_file, batch_size, filter_type, us
     status_log = "🚀 Starting DeepDock-AI Full Virtual Screening Pipeline...\\n"
     progress(0.1, desc="Processing Input Files...")
     
-    # -------------------------------------------------------------
-    # Stage 1: RDKit Pre-filtering & Descriptors
-    # -------------------------------------------------------------
-    status_log += "🔍 Stage 1: Running RDKit Molecular Filtering...\\n"
-    progress(0.25, desc="Stage 1: RDKit Filters & Descriptors")
-    
-    try:
-        filtered_mols, filtered_names, filtered_cids, filter_df = apply_rdkit_filters(
-            ligand_file.name, filter_type=filter_type
-        )
-        status_log += f"✅ Stage 1 Complete: {len(filtered_mols)} molecules passed initial filters.\\n"
-    except Exception as e:
-        return f"❌ Stage 1 Error: {str(e)}", None, None, None, None
+    import os
+from rdkit import Chem
+import pandas as pd
 
-    if not filtered_mols:
-        return "⚠️ No molecules passed the selected RDKit filters.", filter_df, None, None, None
+
+def apply_rdkit_filters(file_path, filter_type="Lipinski"):
+    mols = []
+
+    # 1. Check file extension
+    ext = os.path.splitext(file_path)[-1].lower()
+
+    # 2. SDF / MOL file handling
+    if ext in [".sdf", ".mol"]:
+        supplier = Chem.SDMolSupplier(file_path)
+        mols = [m for m in supplier if m is not None]
+
+    # 3. CSV / TXT file handling (Jahan SMILES column ho)
+    elif ext in [".csv", ".txt", ".smi"]:
+        df = pd.read_csv(file_path)
+
+        # SMILES wala column dhoondain
+        smiles_col = None
+        for col in df.columns:
+            if "smiles" in col.lower() or "smi" in col.lower():
+                smiles_col = col
+                break
+
+        if smiles_col:
+            mols = [
+                Chem.MolFromSmiles(str(s))
+                for s in df[smiles_col]
+                if pd.notna(s) and Chem.MolFromSmiles(str(s)) is not None
+            ]
+        else:
+            # Agar single SMILES per line file ho
+            with open(file_path, "r") as f:
+                for line in f:
+                    line = line.strip().split()[0]  # First column as SMILES
+                    m = Chem.MolFromSmiles(line)
+                    if m:
+                        mols.append(m)
+
+    # -------------------------------------------------------------
+    # Filtering logic here...
+    # -------------------------------------------------------------
+    # ✅ Safe method: Agar name nahi hai to auto-generate kar dein
+        if mol.HasProp("_Name") and mol.GetProp("_Name").strip():
+         mol_name = mol.GetProp("_Name").strip()
+        else:
+         mol_name = f"Molecule_{idx + 1}"  # Automatic default name (e.g., Molecule_1, Molecule_2)
+
+   # Ab mol object par descriptor filters apply karein:
+    mw = Descriptors.MolWt(mol)
+    logp = Descriptors.MolLogP(mol)
+# ... baaki filtering code
+    filtered_mols = []
+    filtered_names = []
+    filtered_cids = []
+
+    # Example filter loop
+    for idx, mol in enumerate(mols):
+        # Apply your Lipinski/Veber/etc filters on 'mol' object
+        filtered_mols.append(mol)
+        filtered_names.append(
+            mol.GetProp("_Name") if mol.HasProp("_Name") else f"Mol_{idx+1}"
+        )
+        filtered_cids.append(idx + 1)
+
+    filter_df = pd.DataFrame({"Name": filtered_names, "CID": filtered_cids})
+
+    return filtered_mols, filtered_names, filtered_cids, filter_df
 
     # -------------------------------------------------------------
     # Stage 2: Batched Molecular Docking & GNINA/Vina Scoring
