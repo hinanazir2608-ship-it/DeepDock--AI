@@ -1,4 +1,6 @@
-'''import os
+import os
+
+gradio_code ='''import os
 import sys
 import zipfile
 import pandas as pd
