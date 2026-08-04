@@ -634,18 +634,26 @@ with tab2:
                 batch_progress = st.progress(0.0)
                 batch_status = st.empty()
 
-                batch_results = dock_ligands(
-                    mols=batch_mols,
-                    names=batch_names,
-                    pdb_bytes=pdbqt_bytes,
-                    center=center,
-                    box_size=box_size,
-                    exhaustiveness=exhaustiveness,
-                    n_poses=n_poses,
-                    progress_bar=batch_progress,
-                    status_text=batch_status,
-                    gnina_weights=weights_path,
-                )
+                try:
+                    batch_results = dock_ligands(
+                        mols=batch_mols,
+                        names=batch_names,
+                        pdb_bytes=pdbqt_bytes,
+                        center=center,
+                        box_size=box_size,
+                        exhaustiveness=exhaustiveness,
+                        n_poses=n_poses,
+                        progress_bar=batch_progress,
+                        status_text=batch_status,
+                        gnina_weights=weights_path,
+                    )
+                except Exception as e:
+                    st.error(
+                        f"❌ Batch {b + 1} crashed: {e}\n\n"
+                        f"Batches 1–{b} are safe in the checkpoint — fix the issue "
+                        f"and click 'Resume from checkpoint' to continue."
+                    )
+                    st.stop()
 
                 top_batch = batch_results[:top_k_per_batch]  # already sorted, best first
                 elite_pool.extend(top_batch)
@@ -673,18 +681,26 @@ with tab2:
             final_progress = st.progress(0.0, text="Running final round…")
             final_status = st.empty()
 
-            final_results = dock_ligands(
-                mols=elite_mols,
-                names=elite_names,
-                pdb_bytes=pdbqt_bytes,
-                center=center,
-                box_size=box_size,
-                exhaustiveness=final_exhaustiveness,
-                n_poses=n_poses,
-                progress_bar=final_progress,
-                status_text=final_status,
-                gnina_weights=weights_path,
-            )
+            try:
+                final_results = dock_ligands(
+                    mols=elite_mols,
+                    names=elite_names,
+                    pdb_bytes=pdbqt_bytes,
+                    center=center,
+                    box_size=box_size,
+                    exhaustiveness=final_exhaustiveness,
+                    n_poses=n_poses,
+                    progress_bar=final_progress,
+                    status_text=final_status,
+                    gnina_weights=weights_path,
+                )
+            except Exception as e:
+                st.error(
+                    f"❌ Final consolidation round crashed: {e}\n\n"
+                    f"All {len(elite_pool)} batches completed and are in the checkpoint. "
+                    f"Click 'Resume from checkpoint' to retry the final round."
+                )
+                st.stop()
 
             st.session_state.docking_results = final_results
             st.session_state.protein_info = site_info
