@@ -19,11 +19,15 @@ class GCNLayer(nn.Module):
     where Â is the pre-normalised adjacency (D^{-1/2} A D^{-1/2}).
     """
 
-    def __init__(self, in_features: int, out_features: int, dropout: float = 0.1):
+    def __init__(
+            self,
+            in_features: int,
+            out_features: int,
+            dropout: float = 0.1):
         super().__init__()
-        self.linear  = nn.Linear(in_features, out_features)
+        self.linear = nn.Linear(in_features, out_features)
         self.dropout = nn.Dropout(p=dropout)
-        self.norm    = nn.LayerNorm(out_features)
+        self.norm = nn.LayerNorm(out_features)
 
     def forward(
         self,
@@ -38,7 +42,7 @@ class GCNLayer(nn.Module):
         return out
 
 
-# ── Global Attention Pooling ──────────────────────────────────────────────────
+# ── Global Attention Pooling ────────────────────────────────────────────
 class AttentionPooling(nn.Module):
     """Soft-attention global pooling over node representations."""
 
@@ -49,16 +53,16 @@ class AttentionPooling(nn.Module):
     def forward(
         self,
         h: torch.Tensor,    # [B, N, F]
-        mask: torch.Tensor, # [B, N]  bool
+        mask: torch.Tensor,  # [B, N]  bool
     ) -> torch.Tensor:      # [B, F]
         logits = self.gate(h).squeeze(-1)           # [B, N]
         logits = logits.masked_fill(~mask, -1e9)
         weights = torch.softmax(logits, dim=1)      # [B, N]
-        pooled = (weights.unsqueeze(-1) * h).sum(1) # [B, F]
+        pooled = (weights.unsqueeze(-1) * h).sum(1)  # [B, F]
         return pooled
 
 
-# ── Main GNN Docking Model ────────────────────────────────────────────────────
+# ── Main GNN Docking Model ──────────────────────────────────────────────
 class DeepDockGNN(nn.Module):
     """
     Graph Neural Network for predicting binding free energy (ΔG, kcal/mol).
@@ -69,8 +73,8 @@ class DeepDockGNN(nn.Module):
     """
 
     NODE_FEATURES = 40   # matches atom_features() in graph_pipeline.py
-    HIDDEN_DIM    = 128
-    MLP_HIDDEN    = 256
+    HIDDEN_DIM = 128
+    MLP_HIDDEN = 256
 
     def __init__(self):
         super().__init__()
@@ -116,8 +120,8 @@ class DeepDockGNN(nn.Module):
     def forward(
         self,
         node_feats: torch.Tensor,  # [B, N, F]
-        adj:        torch.Tensor,  # [B, N, N]
-        mask:       torch.Tensor,  # [B, N]
+        adj: torch.Tensor,  # [B, N, N]
+        mask: torch.Tensor,  # [B, N]
     ) -> torch.Tensor:             # [B]  ΔG values
         h = self.input_proj(node_feats)   # [B, N, H]
 
@@ -135,9 +139,10 @@ class DeepDockGNN(nn.Module):
         return dg
 
 
-# ── Model loader (cached in Streamlit session) ────────────────────────────────
+# ── Model loader (cached in Streamlit session) ──────────────────────────
 @st.cache_resource(show_spinner="Loading DeepDock-AI model onto GPU…")
-def load_model(weights_path: str = "") -> Tuple[DeepDockGNN, torch.device, str]:
+def load_model(
+        weights_path: str = "") -> Tuple[DeepDockGNN, torch.device, str]:
     """
     Load (or initialise) the GNN model, move to CUDA/CPU.
     Uses @st.cache_resource so it runs only once per Streamlit session.
@@ -153,7 +158,7 @@ def load_model(weights_path: str = "") -> Tuple[DeepDockGNN, torch.device, str]:
     precision : 'fp16' | 'fp32'
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model  = DeepDockGNN()
+    model = DeepDockGNN()
 
     if weights_path:
         ckpt = torch.load(weights_path, map_location=device)
@@ -182,9 +187,9 @@ def get_device_info() -> dict:
         "precision": "fp32",
     }
     if torch.cuda.is_available():
-        info["device"]    = f"CUDA:{torch.cuda.current_device()}"
-        info["gpu_name"]  = torch.cuda.get_device_name(0)
+        info["device"] = f"CUDA:{torch.cuda.current_device()}"
+        info["gpu_name"] = torch.cuda.get_device_name(0)
         vram = torch.cuda.get_device_properties(0).total_memory
-        info["vram_gb"]   = round(vram / 1e9, 1)
+        info["vram_gb"] = round(vram / 1e9, 1)
         info["precision"] = "fp16 (AMP)"
     return info

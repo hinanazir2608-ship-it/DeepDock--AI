@@ -15,8 +15,8 @@ from rdkit import Chem
 from rdkit.Chem import Descriptors, QED, rdMolDescriptors, AllChem
 
 
-# ── ADMETlab 3.0 API ──────────────────────────────────────────────────────────
-ADMETLAB_BASE  = "https://admetlab3.scbdd.com"
+# ── ADMETlab 3.0 API ────────────────────────────────────────────────────
+ADMETLAB_BASE = "https://admetlab3.scbdd.com"
 SUBMIT_ENDPOINT = f"{ADMETLAB_BASE}/api/predict"
 RESULT_ENDPOINT = f"{ADMETLAB_BASE}/api/result"
 
@@ -26,21 +26,21 @@ ADMET_TASKS = [
     "MW", "logP", "logD", "HBD", "HBA", "TPSA", "RotBonds",
     "nRings", "nArRings", "Fsp3",
     # ADME
-    "Caco2",        "HIA", "Pgp_inh", "Pgp_sub",
-    "BBB",          "CNS_MPO",
+    "Caco2", "HIA", "Pgp_inh", "Pgp_sub",
+    "BBB", "CNS_MPO",
     "F_20", "F_30",
-    "T_12",         "VD",
-    "CL_hep",       "CL_micro",
+    "T_12", "VD",
+    "CL_hep", "CL_micro",
     # Metabolism
     "CYP1A2_inh", "CYP1A2_sub",
     "CYP2C9_inh", "CYP2C9_sub",
-    "CYP2C19_inh","CYP2C19_sub",
+    "CYP2C19_inh", "CYP2C19_sub",
     "CYP2D6_inh", "CYP2D6_sub",
     "CYP3A4_inh", "CYP3A4_sub",
     # Toxicity
-    "AMES",         "hERG",
-    "H_HT",         "DILI",
-    "Skin_Sen",     "Respiratory_Tox",
+    "AMES", "hERG",
+    "H_HT", "DILI",
+    "Skin_Sen", "Respiratory_Tox",
     "Carcinogens_Ames",
     # Drug-likeness
     "QED", "SA_Score", "NP_Score", "Lipinski", "Pfizer_Rule",
@@ -101,7 +101,8 @@ def predict_via_admetlab3(
         return None
 
     if status_text:
-        status_text.info(f"ADMETlab 3.0 task submitted (id={task_id[:8]}…). Waiting…")
+        status_text.info(
+            f"ADMETlab 3.0 task submitted (id={task_id[:8]}…). Waiting…")
 
     raw = _poll_results(task_id)
     if not raw:
@@ -109,7 +110,7 @@ def predict_via_admetlab3(
 
     records = []
     for i, entry in enumerate(raw):
-        row: Dict = {"Name": names[i] if i < len(names) else f"cpd_{i+1}",
+        row: Dict = {"Name": names[i] if i < len(names) else f"cpd_{i + 1}",
                      "SMILES": smiles_list[i] if i < len(smiles_list) else ""}
         for prop, val in entry.items():
             if prop not in ("smiles", "id"):
@@ -119,16 +120,26 @@ def predict_via_admetlab3(
     return pd.DataFrame(records)
 
 
-# ── RDKit ADMET Fallback ──────────────────────────────────────────────────────
+# ── RDKit ADMET Fallback ────────────────────────────────────────────────
 def _esol_logs(mol: Chem.Mol) -> float:
     """Delaney ESOL model for aqueous solubility estimation (LogS)."""
     try:
-        mw    = Descriptors.MolWt(mol)
+        mw = Descriptors.MolWt(mol)
         clogp = Descriptors.MolLogP(mol)
-        rotb  = rdMolDescriptors.CalcNumRotatableBonds(mol)
-        n_ar  = sum(1 for a in mol.GetAtoms() if a.GetIsAromatic())
-        frac  = n_ar / max(mol.GetNumHeavyAtoms(), 1)
-        return round(0.16 - 0.63 * clogp - 0.0062 * mw + 0.066 * rotb - 0.74 * frac, 3)
+        rotb = rdMolDescriptors.CalcNumRotatableBonds(mol)
+        n_ar = sum(1 for a in mol.GetAtoms() if a.GetIsAromatic())
+        frac = n_ar / max(mol.GetNumHeavyAtoms(), 1)
+        return round(
+            0.16 -
+            0.63 *
+            clogp -
+            0.0062 *
+            mw +
+            0.066 *
+            rotb -
+            0.74 *
+            frac,
+            3)
     except Exception:
         return float("nan")
 
@@ -137,7 +148,8 @@ def _sa_score_rdkit(mol: Chem.Mol) -> float:
     """Synthetic Accessibility Score (Ertl & Schuffenhauer 2009) via RDKit."""
     try:
         from rdkit.Chem import RDConfig
-        import sys, os
+        import sys
+        import os
         sa_path = os.path.join(RDConfig.RDContribDir, "SA_Score")
         if sa_path not in sys.path:
             sys.path.append(sa_path)
@@ -148,16 +160,17 @@ def _sa_score_rdkit(mol: Chem.Mol) -> float:
 
 
 def _bbb_heuristic(mol: Chem.Mol) -> str:
-    mw   = Descriptors.MolWt(mol)
+    mw = Descriptors.MolWt(mol)
     logp = Descriptors.MolLogP(mol)
-    hbd  = rdMolDescriptors.CalcNumHBD(mol)
+    hbd = rdMolDescriptors.CalcNumHBD(mol)
     tpsa = rdMolDescriptors.CalcTPSA(mol)
-    return "Yes" if (mw < 450 and 0 < logp < 5 and hbd <= 3 and tpsa < 90) else "No"
+    return "Yes" if (mw < 450 and 0 < logp < 5 and hbd <=
+                     3 and tpsa < 90) else "No"
 
 
 def _herg_risk(mol: Chem.Mol) -> str:
     logp = Descriptors.MolLogP(mol)
-    mw   = Descriptors.MolWt(mol)
+    mw = Descriptors.MolWt(mol)
     # Simple structural alert heuristic
     smarts_herg = Chem.MolFromSmarts("[#7;!$(N-C=O)]~[#6]~[#6]~[c]")
     has_alert = mol.HasSubstructMatch(smarts_herg) if smarts_herg else False
@@ -169,36 +182,39 @@ def _herg_risk(mol: Chem.Mol) -> str:
 
 
 def _drug_likeness_label(qed: float, viols: int) -> str:
-    if qed >= 0.7 and viols == 0:  return "Excellent"
-    if qed >= 0.5 and viols <= 1:  return "Good"
-    if qed >= 0.3:                  return "Moderate"
+    if qed >= 0.7 and viols == 0:
+        return "Excellent"
+    if qed >= 0.5 and viols <= 1:
+        return "Good"
+    if qed >= 0.3:
+        return "Moderate"
     return "Poor"
 
 
 def predict_rdkit_admet(
-    mols:   List[Chem.Mol],
-    names:  List[str],
+    mols: List[Chem.Mol],
+    names: List[str],
     scores: List[float],
-    cids:   Optional[List[str]] = None, # Add CID parameter
+    cids: Optional[List[str]] = None,  # Add CID parameter
 ) -> pd.DataFrame:
     records = []
     for idx, (mol, name, score) in enumerate(zip(mols, names, scores)):
         cid_val = cids[idx] if cids and idx < len(cids) else "N/A"
         try:
-            mw      = round(Descriptors.ExactMolWt(mol), 2)
-            logp    = round(Descriptors.MolLogP(mol), 2)
-            hbd     = rdMolDescriptors.CalcNumHBD(mol)
-            hba     = rdMolDescriptors.CalcNumHBA(mol)
-            tpsa    = round(rdMolDescriptors.CalcTPSA(mol), 2)
-            rotb    = rdMolDescriptors.CalcNumRotatableBonds(mol)
-            rings   = rdMolDescriptors.CalcNumRings(mol)
-            ar_r    = rdMolDescriptors.CalcNumAromaticRings(mol)
-            fsp3    = round(rdMolDescriptors.CalcFractionCSP3(mol), 3)
+            mw = round(Descriptors.ExactMolWt(mol), 2)
+            logp = round(Descriptors.MolLogP(mol), 2)
+            hbd = rdMolDescriptors.CalcNumHBD(mol)
+            hba = rdMolDescriptors.CalcNumHBA(mol)
+            tpsa = round(rdMolDescriptors.CalcTPSA(mol), 2)
+            rotb = rdMolDescriptors.CalcNumRotatableBonds(mol)
+            rings = rdMolDescriptors.CalcNumRings(mol)
+            ar_r = rdMolDescriptors.CalcNumAromaticRings(mol)
+            fsp3 = round(rdMolDescriptors.CalcFractionCSP3(mol), 3)
             qed_val = round(QED.qed(mol), 3)
-            logs    = _esol_logs(mol)
-            sa      = _sa_score_rdkit(mol)
-            viols   = sum([mw > 500, logp > 5, hbd > 5, hba > 10])
-            hac     = mol.GetNumHeavyAtoms()
+            logs = _esol_logs(mol)
+            sa = _sa_score_rdkit(mol)
+            viols = sum([mw > 500, logp > 5, hbd > 5, hba > 10])
+            hac = mol.GetNumHeavyAtoms()
 
             # PAINS check
             from rdkit.Chem.FilterCatalog import FilterCatalogParams, FilterCatalog
@@ -216,55 +232,55 @@ def predict_rdkit_admet(
             pfizer = "Pass" if logp <= 3 and tpsa >= 75 else "Fail"
 
             records.append({
-                "Name":            name,
-                "CID":             cid_val, # Add CID to output table
-                "ΔG (kcal/mol)":  round(score, 3),
+                "Name": name,
+                "CID": cid_val,  # Add CID to output table
+                "ΔG (kcal/mol)": round(score, 3),
                 # Physicochemical
-                "MW":              mw,
-                "LogP":            logp,
-                "LogD7.4":         round(logp - 0.2 * (7.4 - 7.0), 2),
-                "LogS (ESOL)":     logs,
-                "HBD":             hbd,
-                "HBA":             hba,
-                "TPSA":            tpsa,
-                "RotBonds":        rotb,
-                "Rings":           rings,
-                "ArRings":         ar_r,
-                "Fsp3":            fsp3,
-                "HeavyAtoms":      hac,
+                "MW": mw,
+                "LogP": logp,
+                "LogD7.4": round(logp - 0.2 * (7.4 - 7.0), 2),
+                "LogS (ESOL)": logs,
+                "HBD": hbd,
+                "HBA": hba,
+                "TPSA": tpsa,
+                "RotBonds": rotb,
+                "Rings": rings,
+                "ArRings": ar_r,
+                "Fsp3": fsp3,
+                "HeavyAtoms": hac,
                 # ADME
-                "BBB":             _bbb_heuristic(mol),
-                "HIA":             "High" if tpsa < 100 and mw < 500 else "Low",
-                "Caco2":           "High" if tpsa < 120 and mw < 500 else "Low",
+                "BBB": _bbb_heuristic(mol),
+                "HIA": "High" if tpsa < 100 and mw < 500 else "Low",
+                "Caco2": "High" if tpsa < 120 and mw < 500 else "Low",
                 # Drug-likeness
-                "QED":             qed_val,
-                "SA_Score":        sa,
-                "LipinskiViol":    viols,
-                "Lipinski":        "Pass" if viols == 0 else "Fail",
-                "Veber":           veber_ok,
-                "Pfizer_3_75":     pfizer,
-                "PAINS":           pains_flag,
-                "DrugLikeness":    _drug_likeness_label(qed_val, viols),
+                "QED": qed_val,
+                "SA_Score": sa,
+                "LipinskiViol": viols,
+                "Lipinski": "Pass" if viols == 0 else "Fail",
+                "Veber": veber_ok,
+                "Pfizer_3_75": pfizer,
+                "PAINS": pains_flag,
+                "DrugLikeness": _drug_likeness_label(qed_val, viols),
                 # Toxicity flags
-                "hERG_Risk":       _herg_risk(mol),
-                "AMES_Flag":       "Unknown",  # Requires model
-                "DILI_Flag":       "Unknown",  # Requires model
+                "hERG_Risk": _herg_risk(mol),
+                "AMES_Flag": "Unknown",  # Requires model
+                "DILI_Flag": "Unknown",  # Requires model
             })
         except Exception as e:
-            records.append({"Name": name,"CID": cid_val,"ΔG (kcal/mol)": round(score, 3),
-                            "Error": str(e)})
+            records.append({"Name": name, "CID": cid_val,
+                           "ΔG (kcal/mol)": round(score, 3), "Error": str(e)})
 
     return pd.DataFrame(records)
 
 
-# ── Main entry point ──────────────────────────────────────────────────────────
+# ── Main entry point ────────────────────────────────────────────────────
 def run_admet_analysis(
-    mols:        List[Chem.Mol],
-    names:       List[str],
-    scores:      List[float],
-    cids:        Optional[List[str]] = None, # Add CID parameter
-    use_api:     bool = True,
-    status_text  = None,
+    mols: List[Chem.Mol],
+    names: List[str],
+    scores: List[float],
+    cids: Optional[List[str]] = None,  # Add CID parameter
+    use_api: bool = True,
+    status_text=None,
 ) -> Tuple[pd.DataFrame, str]:
 
     if use_api:
@@ -275,13 +291,16 @@ def run_admet_analysis(
             except Exception:
                 smiles_list.append("")
 
-      api_df = predict_via_admetlab3(smiles_list, names, cids=cids, status_text=status_text)
+        api_df = predict_via_admetlab3(
+            smiles_list, names, cids=cids, status_text=status_text)
         if api_df is not None and not api_df.empty:
-            api_df.insert(1, "ΔG (kcal/mol)", [round(s, 3) for s in scores[:len(api_df)]])
+            api_df.insert(1, "ΔG (kcal/mol)",
+                          [round(s, 3) for s in scores[:len(api_df)]])
             return api_df, "ADMETlab 3.0"
 
     # Fallback to RDKit
     if status_text:
-        status_text.info("ADMETlab 3.0 unavailable — using RDKit ADMET descriptors.")
+        status_text.info(
+            "ADMETlab 3.0 unavailable — using RDKit ADMET descriptors.")
     rdkit_df = predict_rdkit_admet(mols, names, scores, cids=cids)
     return rdkit_df, "RDKit"

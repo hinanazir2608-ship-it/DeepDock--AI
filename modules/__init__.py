@@ -1,1 +1,1 @@
-# DeepDock-AI modules package
+# Makes modules a Python package

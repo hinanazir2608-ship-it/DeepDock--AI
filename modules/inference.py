@@ -18,19 +18,19 @@ from modules.model import DeepDockGNN
 from rdkit import Chem
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────────────
 def _move_batch(batch: dict, device: torch.device) -> dict:
     return {
         "node_feats": batch["node_feats"].to(device, non_blocking=True),
-        "adj":        batch["adj"].to(device, non_blocking=True),
-        "mask":       batch["mask"].to(device, non_blocking=True),
-        "mols":       batch["mols"],
+        "adj": batch["adj"].to(device, non_blocking=True),
+        "mask": batch["mask"].to(device, non_blocking=True),
+        "mols": batch["mols"],
     }
 
 
 def _run_one_batch(
-    model:  DeepDockGNN,
-    batch:  dict,
+    model: DeepDockGNN,
+    batch: dict,
     device: torch.device,
     use_fp16: bool,
 ) -> torch.Tensor:
@@ -45,15 +45,15 @@ def _run_one_batch(
     return scores.float().cpu()
 
 
-# ── Main inference entry point ────────────────────────────────────────────────
+# ── Main inference entry point ──────────────────────────────────────────
 def run_inference(
-    model:       DeepDockGNN,
-    device:      torch.device,
-    mols:        List[Chem.Mol],
-    batch_size:  int = 32,
-    use_fp16:    bool = True,
-    progress_bar = None,          # st.progress() handle
-    status_text  = None,          # st.empty() handle
+    model: DeepDockGNN,
+    device: torch.device,
+    mols: List[Chem.Mol],
+    batch_size: int = 32,
+    use_fp16: bool = True,
+    progress_bar=None,          # st.progress() handle
+    status_text=None,          # st.empty() handle
 ) -> Tuple[List[Chem.Mol], List[float]]:
     """
     Run GNN inference over all mols with OOM-safe batching.
@@ -68,10 +68,10 @@ def run_inference(
 
     # Build initial dataloader
     loader, dataset = build_dataloader(mols, batch_size=batch_size)
-    total_batches   = len(loader)
+    total_batches = len(loader)
 
     all_scores: List[float] = []
-    all_mols:   List[Chem.Mol] = []
+    all_mols: List[Chem.Mol] = []
 
     batch_idx = 0
     # Convert loader to list so we can restart on OOM
@@ -95,13 +95,14 @@ def run_inference(
                 new_bs = max(1, batch_size // 2)
                 if status_text:
                     status_text.warning(
-                        f"CUDA OOM — reducing batch size {batch_size} → {new_bs}"
-                    )
+                        f"CUDA OOM — reducing batch size {batch_size} → {new_bs}")
                 batch_size = new_bs
 
                 # Rebuild remaining batches with smaller batch size
-                remaining_mols = [m for b in batches[batch_idx:] for m in b["mols"]]
-                remaining_loader, _ = build_dataloader(remaining_mols, batch_size=batch_size)
+                remaining_mols = [m for b in batches[batch_idx:]
+                                  for m in b["mols"]]
+                remaining_loader, _ = build_dataloader(
+                    remaining_mols, batch_size=batch_size)
                 batches = batches[:batch_idx] + list(remaining_loader)
                 # Retry same batch_idx with new smaller batches
                 continue
@@ -109,7 +110,7 @@ def run_inference(
             else:
                 raise  # non-OOM error → propagate
 
-        # ── Progress update ───────────────────────────────────────────────────
+        # ── Progress update ──────────────────────────────────────────────────
         frac = min(batch_idx / max(total_batches, 1), 1.0)
         if progress_bar:
             progress_bar.progress(frac)
@@ -128,12 +129,12 @@ def run_inference(
 
 
 def rank_results(
-    mols:   List[Chem.Mol],
+    mols: List[Chem.Mol],
     scores: List[float],
-    top_n:  int = 100,
+    top_n: int = 100,
 ) -> Tuple[List[Chem.Mol], List[float]]:
     """Sort by ΔG (most negative = best binding) and return top N."""
     paired = sorted(zip(scores, mols), key=lambda x: x[0])
-    top    = paired[:top_n]
+    top = paired[:top_n]
     top_scores, top_mols = zip(*top) if top else ([], [])
     return list(top_mols), list(top_scores)

@@ -11,7 +11,7 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 
 
-# ── Atom feature encoding ─────────────────────────────────────────────────────
+# ── Atom feature encoding ───────────────────────────────────────────────
 ATOM_TYPES = [
     "C", "N", "O", "S", "F", "P", "Cl", "Br", "I",
     "B", "Si", "Se", "Te", "other",
@@ -84,15 +84,16 @@ def mol_to_graph(mol: Chem.Mol) -> Optional[dict]:
     if n < 2:
         return None
 
-    # ── Node features ─────────────────────────────────────────────────────────
+    # ── Node features ───────────────────────────────────────────────────────
     node_feats = [atom_features(a) for a in mol.GetAtoms()]
     node_dim = len(node_feats[0])
     node_tensor = torch.zeros(n, node_dim, dtype=torch.float32)
     for i, f in enumerate(node_feats):
         node_tensor[i] = torch.tensor(f, dtype=torch.float32)
 
-    # ── Adjacency + edge features ─────────────────────────────────────────────
-    edge_dim = len(bond_features(mol.GetBondWithIdx(0))) if mol.GetNumBonds() > 0 else 7
+    # ── Adjacency + edge features ───────────────────────────────────────────
+    edge_dim = len(bond_features(mol.GetBondWithIdx(0))
+                   ) if mol.GetNumBonds() > 0 else 7
     adj = torch.zeros(n, n, dtype=torch.float32)
     edge_feat_mat = torch.zeros(n, n, edge_dim, dtype=torch.float32)
 
@@ -115,13 +116,13 @@ def mol_to_graph(mol: Chem.Mol) -> Optional[dict]:
 
     return {
         "node_feats": node_tensor,   # [N, F_node]
-        "adj":        norm_adj,      # [N, N]
-        "n_atoms":    n,
-        "mol":        Chem.RemoveHs(mol),
+        "adj": norm_adj,      # [N, N]
+        "n_atoms": n,
+        "mol": Chem.RemoveHs(mol),
     }
 
 
-# ── Dataset ───────────────────────────────────────────────────────────────────
+# ── Dataset ─────────────────────────────────────────────────────────────
 class LigandGraphDataset(Dataset):
     """Wraps a list of RDKit Mol objects as graph-tensor items."""
 
@@ -151,20 +152,20 @@ def collate_graphs(batch: List[dict]) -> dict:
     node_dim = batch[0]["node_feats"].shape[1]
 
     node_padded = torch.zeros(len(batch), max_n, node_dim)
-    adj_padded  = torch.zeros(len(batch), max_n, max_n)
-    mask        = torch.zeros(len(batch), max_n, dtype=torch.bool)
+    adj_padded = torch.zeros(len(batch), max_n, max_n)
+    mask = torch.zeros(len(batch), max_n, dtype=torch.bool)
 
     for i, g in enumerate(batch):
         n = g["n_atoms"]
         node_padded[i, :n, :] = g["node_feats"]
         adj_padded[i, :n, :n] = g["adj"]
-        mask[i, :n]            = True
+        mask[i, :n] = True
 
     return {
         "node_feats": node_padded,
-        "adj":        adj_padded,
-        "mask":       mask,
-        "mols":       [g["mol"] for g in batch],
+        "adj": adj_padded,
+        "mask": mask,
+        "mols": [g["mol"] for g in batch],
     }
 
 

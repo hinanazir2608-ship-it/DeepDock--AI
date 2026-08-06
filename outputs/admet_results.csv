@@ -1,0 +1,17 @@
+S.No,PubChem CID,Solubility (LogS),HBBB,CYP2D6 Inhibitor
+1,1203,-3.33,Medium,Yes
+2,31553,-2.58,Medium,No
+3,439246,-1.88,Medium,No
+4,440735,-2.64,Medium,Yes
+5,440832,-1.59,Medium,Yes
+6,441773,-1.94,Low,Yes
+7,441774,-3.77,High,Yes
+8,445154,-3.59,High,Yes
+9,5280343,-3.99,Medium,No
+10,5280443,-1.38,High,Yes
+11,5280863,-4.97,Medium,Yes
+12,5280961,-1.56,Medium,Yes
+13,5281654,-3.66,High,Yes
+14,5317750,-1.6,Low,Yes
+15,5391140,-3.56,Low,No
+16,68077,-4.2,Medium,No
