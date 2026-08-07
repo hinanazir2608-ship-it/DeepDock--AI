@@ -4,8 +4,7 @@ pandas>=2.0.0
 rdkit
 meeko>=0.4.0
 vina
-torch
-torchvision
+torch --extra-index-url https://download.pytorch.org/whl/cpu
 python-docx
 requests
 tqdm
