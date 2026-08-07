@@ -13,10 +13,27 @@ import io
 import os
 import tempfile
 import time
+import threading
+import subprocess
+import sys
 from typing import List, Optional, Tuple
 import streamlit as st
 import pandas as pd
 import torch
+
+# ── Backend Runner for Streamlit ──────────────────────────────────────────────
+def run_app_in_background(port: int = 8501):
+    """
+    Python script ke andar se Streamlit app ko backend thread par launch karne ke liye helper function.
+    """
+    def _run():
+        cmd = [sys.executable, "-m", "streamlit", "run", __file__, f"--server.port={port}"]
+        subprocess.run(cmd)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    print(f"🚀 DeepDock-AI backend server started on port {port}")
+
 
 # ── Page config (must be first Streamlit call) ────────────────────────────────
 st.set_page_config(
@@ -121,7 +138,7 @@ def _render_docking_results_table(results: Optional[list]):
         ec1, ec2 = st.columns(2)
         with ec1:
             st.download_button(
-                "⬇ Download PDB Complexes (ZIP)", zip_bytes, "docked_complexes.zip",
+                "⬇ Download GNINA Poses & Complexes (ZIP)", zip_bytes, "gnina_docked_complexes.zip",
                 "application/zip", use_container_width=True,
             )
         with ec2:
@@ -131,6 +148,7 @@ def _render_docking_results_table(results: Optional[list]):
             )
 
     st.success("✅ Docking complete. Proceed to **Stage 3** for ADMET analysis.")
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  SESSION STATE INIT
 # ═════════════════════════════════════════════════════════════════════════════
@@ -278,7 +296,6 @@ if ligand_file or protein_file:
                     ligand_file.getvalue()
                 )
                 if preview_mols:
-                    # Clean CID fallback logic
                     preview_names = [
                         preview_names[i] if (preview_names and i < len(preview_names) and preview_names[i])
                         else extract_ligand_name(m, i)
@@ -338,7 +355,6 @@ with tab1:
             with st.status("Loading ligands…", expanded=True) as s1:
                 raw_mols, raw_names = load_ligands_from_bytes(ligand_file.getvalue())
                 
-                # CID preservation logic
                 raw_names = [
                     raw_names[i] if (raw_names and i < len(raw_names) and raw_names[i])
                     else extract_ligand_name(m, i)
@@ -378,7 +394,6 @@ with tab1:
             st.session_state.all_mols = raw_mols
             st.session_state.all_names = raw_names
 
-        # ── Show results ──────────────────────────────────────────────────────
         if st.session_state.filtered_mols is not None:
             n_pass = len(st.session_state.filtered_mols)
             n_tot = len(st.session_state.all_mols) if st.session_state.all_mols else 0
@@ -422,7 +437,7 @@ with tab1:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# TAB 2 — GNINA Docking (UPDATED WITH CID FIX)
+# TAB 2 — GNINA Docking
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 with tab2:
     st.subheader("⚗️ Stage 2 — GNINA Molecular Docking")
@@ -447,19 +462,17 @@ with tab2:
         st.info("Upload **protein.pdbqt** to run docking.")
 
     elif not enable_batching:
-        # ═══════════════════════════════════════════════════════════════
-        # SINGLE-SHOT MODE
-        # ═══════════════════════════════════════════════════════════════
-        n_to_dock = min(batch_dock, len(mols_ready))
+        n_to_dock = st.number_input(
+            "Ligands to dock (top N from filtered set)",
+            min_value=1, max_value=len(mols_ready),
+            value=min(50, len(mols_ready)), step=1,
+        )
         dock_mols = mols_ready[:n_to_dock]
-
-        # 🔑 FIX: names seedha dock hone wale mols se nikalte hain,
-        # all_names se slice nahi karte (wo filtering ke baad misaligned ho jata hai)
         dock_names = [extract_ligand_name(m, i) for i, m in enumerate(dock_mols)]
 
         st.info(
             f"Ready to dock **{n_to_dock}** ligands "
-            f"(top {batch_dock} from filter)  ·  "
+            f"(top {n_to_dock} from filter)  ·  "
             f"exhaustiveness={exhaustiveness}  ·  {n_poses} poses/ligand"
         )
 
@@ -533,10 +546,7 @@ with tab2:
         _render_docking_results_table(st.session_state.docking_results)
 
     else:
-        # ═══════════════════════════════════════════════════════════════
-        # BATCH MODE — large libraries, elite-pool funnel + checkpointing
-        # ═══════════════════════════════════════════════════════════════
-        all_ready_mols = mols_ready  # poora filtered set, batch_dock cap ignore
+        all_ready_mols = mols_ready
         n_total = len(all_ready_mols)
         n_batches = math.ceil(n_total / batch_size)
         est_elite = min(n_batches * top_k_per_batch, n_total)
@@ -547,12 +557,6 @@ with tab2:
             f"final consolidation round on ~{est_elite} elite ligands "
             f"(exhaustiveness={final_exhaustiveness})"
         )
-        if not torch.cuda.is_available():
-            st.caption(
-                "⏱️ CPU-mode docking is slow — thousands of ligands across many "
-                "batches can take a long time. Test with a small batch_size first "
-                "to estimate per-ligand time."
-            )
 
         ligand_bytes = ligand_file.getvalue() if ligand_file else b""
         protein_bytes_for_key = protein_file.getvalue()
@@ -648,14 +652,10 @@ with tab2:
                         gnina_weights=weights_path,
                     )
                 except Exception as e:
-                    st.error(
-                        f"❌ Batch {b + 1} crashed: {e}\n\n"
-                        f"Batches 1–{b} are safe in the checkpoint — fix the issue "
-                        f"and click 'Resume from checkpoint' to continue."
-                    )
+                    st.error(f"❌ Batch {b + 1} crashed: {e}")
                     st.stop()
 
-                top_batch = batch_results[:top_k_per_batch]  # already sorted, best first
+                top_batch = batch_results[:top_k_per_batch]
                 elite_pool.extend(top_batch)
 
                 with open(checkpoint_path, "wb") as f:
@@ -695,11 +695,7 @@ with tab2:
                     gnina_weights=weights_path,
                 )
             except Exception as e:
-                st.error(
-                    f"❌ Final consolidation round crashed: {e}\n\n"
-                    f"All {len(elite_pool)} batches completed and are in the checkpoint. "
-                    f"Click 'Resume from checkpoint' to retry the final round."
-                )
+                st.error(f"❌ Final consolidation round crashed: {e}")
                 st.stop()
 
             st.session_state.docking_results = final_results
@@ -723,7 +719,7 @@ with tab3:
     st.subheader("📊 Stage 3 — ADMET Analysis & Export")
     st.markdown(
         "ADMET profiling via **ADMETlab 3.0** (Gui et al. 2024) API with RDKit fallback.  "
-        "Exports: **DOCX report**, **CSV**, **PDB complexes ZIP**."
+        "Exports: **DOCX report**, **CSV**, **GNINA Poses / PDB complexes ZIP**."
     )
 
     docking_results = st.session_state.docking_results
@@ -734,7 +730,7 @@ with tab3:
     else:
         top_results = docking_results[:top_admet]
         top_mols = [r.mol for r in top_results]
-        top_names = [r.name for r in top_results]  # Uses exact PubChem CIDs
+        top_names = [r.name for r in top_results]
         top_scores = [r.gnina_affinity for r in top_results]
 
         st.info(
@@ -764,12 +760,10 @@ with tab3:
             st.session_state.admet_df = admet_df
             st.session_state.admet_source = source
 
-        # ── Show ADMET results ────────────────────────────────────────────────
         if st.session_state.admet_df is not None:
             admet_df = st.session_state.admet_df
             source = st.session_state.admet_source or "RDKit"
 
-            # KPI row
             k1, k2, k3, k4, k5 = st.columns(5)
             dg_col = admet_df.get("ΔG (kcal/mol)", pd.Series(dtype=float))
             k1.metric("Compounds analysed", len(admet_df))
@@ -787,7 +781,6 @@ with tab3:
 
             st.markdown(f"#### ADMET Profiles *(source: {source})*")
 
-            # Colour helpers
             def _dl_colour(val):
                 mapping = {
                     "Excellent": "#00C853",
@@ -833,7 +826,6 @@ with tab3:
 
             st.dataframe(st_admet, use_container_width=True, height=420)
 
-            # Drug-likeness distribution
             if "DrugLikeness" in admet_df.columns:
                 with st.expander("📈 Drug-Likeness Distribution"):
                     dl_counts = admet_df["DrugLikeness"].value_counts()
@@ -855,7 +847,7 @@ with tab3:
                     use_container_width=True,
                 )
 
-            # PDB complexes ZIP
+            # GNINA Poses / PDB complexes ZIP
             dock_res = st.session_state.docking_results or []
             top_dock = dock_res[:top_admet]
             complexes = [r.complex_pdb for r in top_dock if r.complex_pdb]
@@ -865,9 +857,9 @@ with tab3:
                 with e2:
                     pdb_zip = export_pdb_complexes_zip(complexes, c_names, c_scores)
                     st.download_button(
-                        "⬇ PDB Complexes ZIP",
+                        "⬇ Download GNINA Poses (ZIP)",
                         pdb_zip,
-                        "top_hits_complexes.zip",
+                        "gnina_top_hits_complexes.zip",
                         "application/zip",
                         use_container_width=True,
                     )
@@ -950,3 +942,7 @@ Weights: [github.com/gnina/gnina/tree/master/weights](https://github.com/gnina/g
 st.caption(
     "DeepDock-AI · AutoDock-Vina + GNINA + RDKit + ADMETlab 3.0 · Kaggle T4/P100"
 )
+
+# Optional entry point for background running
+if __name__ == "__main__":
+    pass
