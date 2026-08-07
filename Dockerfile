@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 
-# System level C++ dependencies install karne ke liye
+# System dependencies for Boost C++, Vina, and RDKit
 RUN apt-get update && apt-get install -y \
     build-essential \
     libboost-all-dev \
@@ -10,15 +10,16 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Requirements file copy karke dependencies install karna
+# Copy requirement file
 COPY requirements.txt .
+
+# Install PyTorch CPU first, then rest of requirements
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Baqi ka code copy karna
+# Copy source code
 COPY . .
 
-# Streamlit port expose karna
 EXPOSE 8501
 
-# Application run karne ki command
 CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
