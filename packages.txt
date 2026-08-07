@@ -1,7 +1,4 @@
-swig
-libboost-all-dev
-build-essential
-cmake
-g++
 libgl1
-libglib2.0-dev
+libglib2.0-0
+libgomp1
+swig
