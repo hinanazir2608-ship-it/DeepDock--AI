@@ -1,24 +1,15 @@
-# --- Virtual Screening & Docking Core ---
+streamlit>=1.30.0
+streamlit-molstar>=0.4.0
+streamlit-aggrid>=0.3.4
+pandas>=2.0.0
+numpy<2.0.0
 vina>=1.2.5
 meeko>=0.5.0
 gemmi>=0.6.3
-openbabel-python>=3.1.1.8; platform_system!="Windows" # Alternative for PyPI bindings
-
-# --- Structure & Cheminformatics Support ---
+openbabel-python>=3.1.1.8
 rdkit>=2023.9.1
-numpy<2.0.0 # Prevents ABI mismatch issues with compiled C extensions
-scipy>=1.10.0
-pandas
 py3Dmol>=2.0.0
-# --- C++ Build Support (Required if compiling Vina/Meeko backends on deployment) ---
-swig>=4.1.0
+pydantic>=2.0.0
+psutil>=5.9.0
 setuptools>=65.0.0
 wheel
-
-# --- Execution & Async Process Utilities (For Gnina & Vina CLI invocations) ---
-subprocess32; python_version<"3.0"
-pydantic>=2.0.0
-CXXFLAGS += -Wno-parentheses -Wno-reorder -Wno-unused-variable
-target_compile_options(vina PRIVATE -w) # Suppress all warnings
-# Or specifically for parentheses and reordering:
-target_compile_options(vina PRIVATE -Wno-parentheses -Wno-reorder -Wno-unused-variable)
