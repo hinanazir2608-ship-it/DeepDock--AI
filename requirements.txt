@@ -1,0 +1,11 @@
+streamlit>=1.30.0
+numpy<2.0.0
+pandas>=2.0.0
+rdkit
+meeko>=0.4.0
+vina
+torch
+torchvision
+python-docx
+requests
+tqdm
