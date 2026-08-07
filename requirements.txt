@@ -9,3 +9,7 @@ torchvision
 python-docx
 requests
 tqdm
+CXXFLAGS += -Wno-parentheses -Wno-reorder -Wno-unused-variable
+target_compile_options(vina PRIVATE -w) # Suppress all warnings
+# Or specifically for parentheses and reordering:
+target_compile_options(vina PRIVATE -Wno-parentheses -Wno-reorder -Wno-unused-variable)
