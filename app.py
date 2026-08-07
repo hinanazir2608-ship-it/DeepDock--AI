@@ -21,20 +21,6 @@ import streamlit as st
 import pandas as pd
 import torch
 
-# ── Backend Runner for Streamlit ──────────────────────────────────────────────
-def run_app_in_background(port: int = 8501):
-    """
-    Python script ke andar se Streamlit app ko backend thread par launch karne ke liye helper function.
-    """
-    def _run():
-        cmd = [sys.executable, "-m", "streamlit", "run", __file__, f"--server.port={port}"]
-        subprocess.run(cmd)
-
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
-    print(f"🚀 DeepDock-AI backend server started on port {port}")
-
-
 # ── Page config (must be first Streamlit call) ────────────────────────────────
 st.set_page_config(
     page_title="DeepDock-AI",
