@@ -1,4 +1,11 @@
-libgl1
-libglib2.0-0
-libgomp1
+build-essential
+cmake
 swig
+openmpi-bin
+libopenmpi-dev
+libboost-system-dev
+libboost-filesystem-dev
+libboost-python-dev
+libboost-iostreams-dev
+libnl-3-dev
+libnl-route-3-dev
