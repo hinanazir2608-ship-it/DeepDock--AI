@@ -1,6 +1,9 @@
 build-essential
-cmake
 swig
+libboost-all-dev
+libgl1
+libglib2.0-0
+cmake
 openmpi-bin
 libopenmpi-dev
 libboost-system-dev
