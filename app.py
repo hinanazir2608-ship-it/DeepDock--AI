@@ -17,7 +17,15 @@ from typing import List, Optional, Tuple
 import streamlit as st
 import pandas as pd
 import torch
+from modules.docking import dock_ligands, load_gnina_model, VINA_AVAILABLE
 
+st.title("DeepDock AI")
+
+# Memory clean call on page load
+gc.collect()
+
+if not VINA_AVAILABLE:
+    st.error("Docking engine failed to initialize. Please check native dependencies.")
 # ── Page config (must be first Streamlit call) ────────────────────────────────
 st.set_page_config(
     page_title="DeepDock-AI",
