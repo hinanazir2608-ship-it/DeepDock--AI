@@ -6,7 +6,7 @@ numpy<2.0.0
 vina>=1.2.5 --only-binary vina
 meeko>=0.5.0
 gemmi>=0.6.3
-openbabel-python>=3.1.1.8
+openbabel-wheel>=3.1.1.8
 rdkit>=2023.9.1
 py3Dmol>=2.0.0
 pydantic>=2.0.0
