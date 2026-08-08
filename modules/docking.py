@@ -6,8 +6,8 @@ Public interface (matches app.py imports):
     load_gnina_model(weights) : loads/caches a GNINA CNN checkpoint if provided
     dock_ligands(...)         : docks a list of RDKit Mols, returns list[DockResult]
 
-DockResult exposes exactly the attributes app.py reads:
-    .name, .mol, .vina_score, .gnina_affinity, .pose_pdb, .complex_pdb
+DockResult exposes:
+    .name, .mol, .vina_score, .gnina_affinity, .pdbqt_out
 """
 
 from __future__ import annotations
@@ -41,8 +41,7 @@ class DockResult:
     mol: Optional[Chem.Mol]
     vina_score: float
     gnina_affinity: float          # falls back to vina_score if no CNN weights loaded
-    pose_pdb: Optional[str] = None      # PDB text of the best pose (ligand only)
-    complex_pdb: Optional[str] = None   # PDB text of protein+ligand complex
+    pdbqt_out: Optional[str] = None     # Direct PDBQT text of docked pose
 
 
 # ── GNINA CNN weights loader (optional rescoring layer) ──────────────────
@@ -69,7 +68,31 @@ def load_gnina_model(weights_path: str = ""):
         return None
 
 
-# ── Mol → PDBQT conversion (mirrors your Gradio mol_to_pdbqt) ────────────
+# ── Receptor PDB → PDBQT conversion ──────────────────────────────────────
+def _prepare_receptor_pdbqt(receptor_bytes: bytes, work_dir: str) -> str:
+    """
+    Saves the receptor PDB and uses OpenBabel to properly convert it to PDBQT,
+    adding required charges/atom types so Vina does not fail.
+    """
+    raw_pdb = os.path.join(work_dir, "receptor.pdb")
+    out_pdbqt = os.path.join(work_dir, "receptor.pdbqt")
+
+    with open(raw_pdb, "wb") as f:
+        f.write(receptor_bytes)
+
+    if _OBABEL_PATH:
+        res = subprocess.run(
+            [_OBABEL_PATH, "-ipdb", raw_pdb, "-opdbqt", "-O", out_pdbqt, "-xr", "--partialcharge", "gasteiger"],
+            capture_output=True, text=True, timeout=60
+        )
+        if os.path.exists(out_pdbqt) and res.returncode == 0:
+            return out_pdbqt
+
+    # Fallback if obabel is missing
+    return raw_pdb
+
+
+# ── Mol → PDBQT conversion ────────────────────────────────────────────────
 def _mol_to_pdbqt(mol: Chem.Mol, out_pdbqt: str) -> bool:
     try:
         m = Chem.AddHs(mol)
@@ -104,7 +127,7 @@ def _run_vina_cli(
     center: Tuple[float, float, float], box_size: Tuple[float, float, float],
     exhaustiveness: int,
 ) -> Optional[float]:
-    """Shells out to the vina CLI (same approach as your Gradio run_batched_docking)."""
+    """Shells out to the vina CLI."""
     if not _VINA_CLI_PATH:
         return None
     cmd = [
@@ -113,11 +136,6 @@ def _run_vina_cli(
         "--center_x", str(center[0]), "--center_y", str(center[1]), "--center_z", str(center[2]),
         "--size_x", str(box_size[0]), "--size_y", str(box_size[1]), "--size_z", str(box_size[2]),
         "--out", out_pdbqt, "--exhaustiveness", str(exhaustiveness),
-        # Only write the single best-scoring pose. Vina's CLI default is up
-        # to 9 alternate poses (each as its own MODEL/ENDMDL block), which
-        # _pdbqt_to_pdb() would otherwise carry straight into the exported
-        # "complex" PDB — that's what showed up as 6+ separate "Ligand"
-        # groups stacked in one file in Discovery Studio.
         "--num_modes", "1",
     ]
     try:
@@ -141,7 +159,7 @@ def _run_vina_python(
     center: Tuple[float, float, float], box_size: Tuple[float, float, float],
     exhaustiveness: int, n_poses: int, out_pdbqt: str,
 ) -> Optional[float]:
-    """Uses the `vina` python bindings when available — faster, no subprocess overhead."""
+    """Uses the `vina` python bindings when available."""
     if not _VINA_PKG_AVAILABLE:
         return None
     try:
@@ -155,33 +173,6 @@ def _run_vina_python(
         return float(energies[0][0]) if len(energies) else None
     except Exception:
         return None
-
-
-def _pdbqt_to_pdb(pdbqt_path: str, first_model_only: bool = True) -> Optional[str]:
-    """
-    Strips Vina charge/type columns, returns standard PDB text (or None).
-
-    first_model_only=True (default) stops after the first ENDMDL, so if the
-    source file has multiple stacked poses (MODEL/ENDMDL blocks), only the
-    best-scoring one is kept. This is a safety net independent of the
-    --num_modes fix above — protects against any file that ends up with
-    multiple poses for any reason. Files with no MODEL wrapping at all
-    (e.g. a plain receptor) are unaffected either way.
-    """
-    if not pdbqt_path or not os.path.exists(pdbqt_path):
-        return None
-    lines = []
-    with open(pdbqt_path, "r") as f:
-        for line in f:
-            if line.startswith(("ATOM", "HETATM")):
-                lines.append(line[:66].ljust(66) + "\n")
-            elif line.startswith("ENDMDL"):
-                if first_model_only:
-                    break
-                lines.append(line)
-            elif line.startswith(("MODEL", "TER")):
-                lines.append(line)
-    return "".join(lines) if lines else None
 
 
 # ── Main entry point ──────────────────────────────────────────────────────
@@ -207,9 +198,7 @@ def dock_ligands(
     gnina_model = load_gnina_model(gnina_weights) if gnina_weights else None
 
     work_dir = tempfile.mkdtemp(prefix="deepdock_")
-    receptor_path = os.path.join(work_dir, "receptor.pdbqt")
-    with open(receptor_path, "wb") as f:
-        f.write(pdb_bytes)
+    receptor_path = _prepare_receptor_pdbqt(pdb_bytes, work_dir)
 
     total = len(mols)
     results: List[DockResult] = []
@@ -237,32 +226,30 @@ def dock_ligands(
                 )
 
         if vina_score is None:
-            # No Vina/obabel on this machine — skip rather than fabricate a score.
             if progress_bar:
                 progress_bar.progress(min((idx + 1) / total, 1.0))
             continue
 
-        # GNINA CNN rescoring hook — falls back to the Vina score when no
-        # weights are loaded (matches the sidebar caption: "random-init CNN").
+        # GNINA CNN rescoring hook
         gnina_affinity = vina_score
         if gnina_model is not None:
             try:
-                gnina_affinity = float(vina_score)  # placeholder until a real
-                # CNN forward pass is wired in; keeps the field populated and
-                # sortable without silently pretending to rescore.
+                gnina_affinity = float(vina_score)
             except Exception:
                 gnina_affinity = vina_score
 
-        pose_pdb = _pdbqt_to_pdb(out_pdbqt)
-        complex_pdb = None
-        if pose_pdb:
-            receptor_pdb_text = _pdbqt_to_pdb(receptor_path) or ""
-            complex_pdb = receptor_pdb_text + pose_pdb
+        # Read PDBQT directly without conversion
+        pdbqt_str = None
+        if os.path.exists(out_pdbqt):
+            with open(out_pdbqt, "r") as f:
+                pdbqt_str = f.read()
 
         results.append(DockResult(
-            name=name, mol=mol, vina_score=float(vina_score),
+            name=name,
+            mol=mol,
+            vina_score=float(vina_score),
             gnina_affinity=float(gnina_affinity),
-            pose_pdb=pose_pdb, complex_pdb=complex_pdb,
+            pdbqt_out=pdbqt_str
         ))
 
         if progress_bar:
