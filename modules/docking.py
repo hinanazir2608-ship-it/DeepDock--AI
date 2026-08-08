@@ -113,6 +113,12 @@ def _run_vina_cli(
         "--center_x", str(center[0]), "--center_y", str(center[1]), "--center_z", str(center[2]),
         "--size_x", str(box_size[0]), "--size_y", str(box_size[1]), "--size_z", str(box_size[2]),
         "--out", out_pdbqt, "--exhaustiveness", str(exhaustiveness),
+        # Only write the single best-scoring pose. Vina's CLI default is up
+        # to 9 alternate poses (each as its own MODEL/ENDMDL block), which
+        # _pdbqt_to_pdb() would otherwise carry straight into the exported
+        # "complex" PDB — that's what showed up as 6+ separate "Ligand"
+        # groups stacked in one file in Discovery Studio.
+        "--num_modes", "1",
     ]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
@@ -151,8 +157,17 @@ def _run_vina_python(
         return None
 
 
-def _pdbqt_to_pdb(pdbqt_path: str) -> Optional[str]:
-    """Strips Vina charge/type columns, returns standard PDB text (or None)."""
+def _pdbqt_to_pdb(pdbqt_path: str, first_model_only: bool = True) -> Optional[str]:
+    """
+    Strips Vina charge/type columns, returns standard PDB text (or None).
+
+    first_model_only=True (default) stops after the first ENDMDL, so if the
+    source file has multiple stacked poses (MODEL/ENDMDL blocks), only the
+    best-scoring one is kept. This is a safety net independent of the
+    --num_modes fix above — protects against any file that ends up with
+    multiple poses for any reason. Files with no MODEL wrapping at all
+    (e.g. a plain receptor) are unaffected either way.
+    """
     if not pdbqt_path or not os.path.exists(pdbqt_path):
         return None
     lines = []
@@ -160,7 +175,11 @@ def _pdbqt_to_pdb(pdbqt_path: str) -> Optional[str]:
         for line in f:
             if line.startswith(("ATOM", "HETATM")):
                 lines.append(line[:66].ljust(66) + "\n")
-            elif line.startswith(("MODEL", "ENDMDL", "TER")):
+            elif line.startswith("ENDMDL"):
+                if first_model_only:
+                    break
+                lines.append(line)
+            elif line.startswith(("MODEL", "TER")):
                 lines.append(line)
     return "".join(lines) if lines else None
 
