@@ -1,3 +1,4 @@
-libboost-all-dev
+openbabel
+autodock-vina
 swig
 build-essential
