@@ -3,3 +3,4 @@ autodock-vina
 swig
 build-essential
 libboost-all-dev
+python3-dev
