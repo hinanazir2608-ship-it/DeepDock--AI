@@ -2,3 +2,4 @@ openbabel
 autodock-vina
 swig
 build-essential
+libboost-all-dev
