@@ -44,8 +44,8 @@ This project is optimized for deployment on **Streamlit Community Cloud**. It in
 
 ```bash
 # Clone repository
-git clone [https://github.com/your-username/deepdock--ai.git](https://github.com/your-username/deepdock--ai.git)
-cd deepdock--ai
+git clone [https://github.com/hinanazir2608-ship-it/DeepDock--AI.git](https://github.com/hinanazir2608-ship-it/DeepDock--AI.git)
+cd DeepDock--AI
 
 # Install dependencies
 pip install -r requirements.txt
