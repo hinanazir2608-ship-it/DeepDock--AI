@@ -1,186 +1,103 @@
-from __future__ import annotations
 import os
-import shutil
-import subprocess
-import tempfile
-from dataclasses import dataclass
-from typing import List, Optional, Tuple
+import sys
+import logging
+from typing import List, Dict, Any, Optional
 
-from rdkit import Chem
-from rdkit.Chem import AllChem
+# Set up logging
+logger = logging.getLogger(__name__)
 
-# ── Availability checks (System Binaries Only) ───────────────────────────
-_OBABEL_PATH = shutil.which("obabel") or "/usr/bin/obabel"
-_VINA_CLI_PATH = shutil.which("autodock_vina") or shutil.which("vina") or "/usr/bin/autodock_vina"
+# --- Safe Imports with Graceful Fallbacks ---
 
-# Direct CLI check (No PyVina C++ module import to prevent SegFault)
-VINA_AVAILABLE = bool(_VINA_CLI_PATH and os.path.exists(_VINA_CLI_PATH))
+# 1. Check AutoDock Vina Availability
+try:
+    from vina import Vina
+    VINA_AVAILABLE = True
+except ImportError as e:
+    VINA_AVAILABLE = False
+    logger.warning(f"Vina module could not be imported: {e}")
 
+# 2. Check OpenBabel / Meeko Availability
+try:
+    from openbabel import openbabel
+    OPENBABEL_AVAILABLE = True
+except ImportError:
+    OPENBABEL_AVAILABLE = False
 
-@dataclass
-class DockResult:
-    name: str
-    mol: Optional[Chem.Mol]
-    vina_score: float
-    gnina_affinity: float
-    pdbqt_out: Optional[str] = None
-
-
-# ── Receptor PDB → PDBQT conversion ──────────────────────────────────────
-def _prepare_receptor_pdbqt(receptor_bytes: bytes, work_dir: str) -> str:
-    raw_pdb = os.path.join(work_dir, "receptor.pdb")
-    out_pdbqt = os.path.join(work_dir, "receptor.pdbqt")
-
-    with open(raw_pdb, "wb") as f:
-        f.write(receptor_bytes)
-
-    if _OBABEL_PATH and os.path.exists(_OBABEL_PATH):
-        try:
-            res = subprocess.run(
-                [_OBABEL_PATH, "-ipdb", raw_pdb, "-opdbqt", "-O", out_pdbqt, "-xr", "--partialcharge", "gasteiger"],
-                capture_output=True, text=True, timeout=60
-            )
-            if os.path.exists(out_pdbqt) and res.returncode == 0:
-                return out_pdbqt
-        except Exception:
-            pass
-
-    return raw_pdb
+# 3. Check PyTorch / GNINA Model Availability
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
 
 
-# ── Mol → PDBQT conversion ────────────────────────────────────────────────
-def _mol_to_pdbqt(mol: Chem.Mol, out_pdbqt: str) -> bool:
+# --- Core Functions ---
+
+def load_gnina_model(model_path: Optional[str] = None) -> Any:
+    """
+    Loads the GNINA scoring/docking model if PyTorch is installed.
+    """
+    if not TORCH_AVAILABLE:
+        logger.error("PyTorch is not installed. Cannot load GNINA model.")
+        return None
+    
     try:
-        m = Chem.AddHs(mol)
-        if m.GetNumConformers() == 0:
-            params = AllChem.ETKDGv3()
-            params.randomSeed = 42
-            res = AllChem.EmbedMolecule(m, params)
-            if res == -1:
-                res = AllChem.EmbedMolecule(m, AllChem.ETKDG())
-            
-            if res != -1:
-                try:
-                    AllChem.MMFFOptimizeMolecule(m, maxIters=100)
-                except Exception:
-                    pass
-
-        pdb_path = out_pdbqt.replace(".pdbqt", ".pdb")
-        Chem.MolToPDBFile(m, pdb_path)
-
-        if not _OBABEL_PATH or not os.path.exists(_OBABEL_PATH) or not os.path.exists(pdb_path):
-            return False
-
-        result = subprocess.run(
-            [_OBABEL_PATH, "-ipdb", pdb_path, "-opdbqt", "-O", out_pdbqt, "--partialcharge", "eem"],
-            capture_output=True, text=True, timeout=60,
-        )
-        return os.path.exists(out_pdbqt) and result.returncode == 0
+        # Example model loading logic (adjust to your model architecture)
+        if model_path and os.path.exists(model_path):
+            model = torch.load(model_path, map_location=torch.device("cpu"))
+            model.eval()
+            return model
+        else:
+            logger.warning("GNINA model path not found or not provided.")
+            return None
     except Exception as e:
-        print(f"[Conversion Error]: {e}")
-        return False
-
-
-def _run_vina_cli(
-    receptor_pdbqt: str, ligand_pdbqt: str, out_pdbqt: str,
-    center: Tuple[float, float, float], box_size: Tuple[float, float, float],
-    exhaustiveness: int,
-) -> Optional[float]:
-    if not _VINA_CLI_PATH or not os.path.exists(_VINA_CLI_PATH):
-        return None
-    cmd = [
-        _VINA_CLI_PATH,
-        "--receptor", receptor_pdbqt, "--ligand", ligand_pdbqt,
-        "--center_x", str(center[0]), "--center_y", str(center[1]), "--center_z", str(center[2]),
-        "--size_x", str(box_size[0]), "--size_y", str(box_size[1]), "--size_z", str(box_size[2]),
-        "--out", out_pdbqt, "--exhaustiveness", str(exhaustiveness),
-        "--num_modes", "1",
-    ]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        for line in proc.stdout.splitlines():
-            line = line.strip()
-            if line.startswith("1"):
-                parts = line.split()
-                if len(parts) >= 2:
-                    try:
-                        return float(parts[1])
-                    except ValueError:
-                        pass
-        return None
-    except Exception as e:
-        print(f"[Vina CLI Exception]: {e}")
+        logger.error(f"Error loading GNINA model: {e}")
         return None
 
 
-# ── Main Entry Point ──────────────────────────────────────────────────────
 def dock_ligands(
-    mols: List[Chem.Mol],
-    names: List[str],
-    pdb_bytes: bytes,
-    center: Tuple[float, float, float],
-    box_size: Tuple[float, float, float],
+    receptor_path: str,
+    ligand_paths: List[str],
+    center: List[float],
+    box_size: List[float],
     exhaustiveness: int = 8,
-    n_poses: int = 5,
-    progress_bar=None,
-    status_text=None,
-    gnina_weights: str = "",
-) -> List[DockResult]:
-    if not mols:
-        return []
+    n_poses: int = 9
+) -> Dict[str, Any]:
+    """
+    Executes AutoDock Vina screening over a list of ligand PDBQT files.
+    """
+    if not VINA_AVAILABLE:
+        raise RuntimeError(
+            "AutoDock Vina is not installed or failed to load. "
+            "Please check system Boost libraries (`libboost-all-dev`) in packages.txt."
+        )
 
-    work_dir = tempfile.mkdtemp(prefix="deepdock_")
-    receptor_path = _prepare_receptor_pdbqt(pdb_bytes, work_dir)
+    results = {}
 
-    total = len(mols)
-    results: List[DockResult] = []
+    for ligand_file in ligand_paths:
+        try:
+            v = Vina(sf_name='vina')
+            v.set_receptor(receptor_path)
+            v.set_ligand_from_file(ligand_file)
+            
+            # Set grid box definition
+            v.compute_vina_maps(center=center, box_size=box_size)
+            
+            # Run docking execution
+            v.dock(exhaustiveness=exhaustiveness, n_poses=n_poses)
+            
+            # Retrieve energy scores
+            energies = v.energies(n_poses=n_poses)
+            results[ligand_file] = {
+                "status": "Success",
+                "affinity": energies[0][0] if len(energies) > 0 else None,
+                "all_poses_affinity": [e[0] for e in energies]
+            }
+        except Exception as e:
+            logger.error(f"Failed docking for {ligand_file}: {e}")
+            results[ligand_file] = {
+                "status": "Failed",
+                "error": str(e)
+            }
 
-    for idx, (mol, name) in enumerate(zip(mols, names)):
-        if status_text:
-            try:
-                status_text.text(f"Docking {idx + 1}/{total}: {name}")
-            except Exception:
-                pass
-
-        ligand_pdbqt = os.path.join(work_dir, f"{idx}_{name}.pdbqt")
-        out_pdbqt = os.path.join(work_dir, f"{idx}_{name}_out.pdbqt")
-
-        converted = _mol_to_pdbqt(mol, ligand_pdbqt)
-
-        vina_score: Optional[float] = None
-        if converted and os.path.exists(ligand_pdbqt):
-            vina_score = _run_vina_cli(
-                receptor_path, ligand_pdbqt, out_pdbqt,
-                center, box_size, exhaustiveness
-            )
-
-        if vina_score is None:
-            if progress_bar:
-                try:
-                    progress_bar.progress(min((idx + 1) / total, 1.0))
-                except Exception:
-                    pass
-            continue
-
-        pdbqt_str = None
-        if os.path.exists(out_pdbqt):
-            with open(out_pdbqt, "r") as f:
-                pdbqt_str = f.read()
-
-        results.append(DockResult(
-            name=name,
-            mol=mol,
-            vina_score=float(vina_score),
-            gnina_affinity=float(vina_score),
-            pdbqt_out=pdbqt_str
-        ))
-
-        if progress_bar:
-            try:
-                progress_bar.progress(min((idx + 1) / total, 1.0))
-            except Exception:
-                pass
-
-    shutil.rmtree(work_dir, ignore_errors=True)
-    results.sort(key=lambda r: r.gnina_affinity)
     return results
