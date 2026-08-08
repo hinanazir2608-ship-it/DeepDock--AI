@@ -1,5 +1,5 @@
 """
-Preprocessing: SDF ligand loading + PDB active-site parsing + conf.txt grid parsing.
+Preprocessing: SDF ligand loading + PDB active-site parsing + conf.txt grid parsing + PDBQT Conversion.
 """
 
 from __future__ import annotations
@@ -7,16 +7,74 @@ import re
 from typing import List, Tuple, Optional, Dict
 from pathlib import Path
 import io
+import subprocess
+import tempfile
+import logging
 
 from rdkit import Chem
 from rdkit.Chem import AllChem, Descriptors
 
+logger = logging.getLogger(__name__)
+
+
+# ── PDBQT Conversion & Sanitization Helper ────────────────────────────
+def clean_pdbqt_string(pdbqt_str: str) -> str:
+    """
+    Sanitize PDBQT content by stripping illegal tags (COMPND, HEADER, etc.)
+    that crash AutoDock Vina's C++ parser.
+    """
+    allowed_keywords = ("ATOM", "HETATM", "ROOT", "ENDROOT", "BRANCH", "ENDBRANCH", "TORSDOF")
+    lines = pdbqt_str.splitlines()
+    clean_lines = [line for line in lines if line.strip().startswith(allowed_keywords)]
+    return "\n".join(clean_lines) + "\n"
+
+
+def mol_to_pdbqt(mol: Chem.Mol, out_path: str) -> bool:
+    """
+    Converts an RDKit Mol object into a valid AutoDock Vina PDBQT file using OpenBabel.
+    Ensures sanitization of COMPND / invalid header tags.
+    """
+    try:
+        # Prepare mol with hydrogens
+        mol_h = Chem.AddHs(mol, addCoords=True)
+        
+        with tempfile.NamedTemporaryFile(suffix=".sdf", delete=False, mode="w") as tmp_sdf:
+            writer = Chem.SDWriter(tmp_sdf.name)
+            writer.write(mol_h)
+            writer.close()
+            tmp_sdf_path = tmp_sdf.name
+
+        # Convert SDF to PDBQT using obabel CLI
+        cmd = ["obabel", tmp_sdf_path, "-O", out_path, "-vh"]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        # Cleanup temp SDF file
+        if Path(tmp_sdf_path).exists():
+            Path(tmp_sdf_path).unlink()
+
+        if res.returncode == 0 and Path(out_path).exists():
+            # Sanitize generated PDBQT
+            with open(out_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            
+            sanitized_content = clean_pdbqt_string(content)
+            
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(sanitized_content)
+            
+            return True
+        else:
+            logger.error(f"Obabel conversion failed: {res.stderr}")
+            return False
+
+    except Exception as e:
+        logger.error(f"Error converting molecule to PDBQT: {e}")
+        return False
+
 
 # ── Ligand SDF loading ──────────────────────────────────────────────────
-# modules/preprocessing.py me replace karein:
 
-def load_ligands_from_bytes(
-        sdf_bytes: bytes) -> Tuple[List[Chem.Mol], List[str]]:
+def load_ligands_from_bytes(sdf_bytes: bytes) -> Tuple[List[Chem.Mol], List[str]]:
     stream = io.BytesIO(sdf_bytes)
     suppl = Chem.ForwardSDMolSupplier(stream, removeHs=False, sanitize=True)
 
@@ -29,7 +87,7 @@ def load_ligands_from_bytes(
         if mol is None:
             continue
 
-        # 🔹 Extract CID or fallback to _Name
+        # Extract CID or fallback to _Name
         props = mol.GetPropsAsDict()
         name = (
             props.get("CID") or
@@ -95,8 +153,7 @@ def parse_pdb_binding_site(pdb_bytes: bytes) -> Dict:
             if res_name in ("HOH", "WAT", "DOD", "H2O"):
                 continue
             try:
-                x, y, z = float(line[30:38]), float(
-                    line[38:46]), float(line[46:54])
+                x, y, z = float(line[30:38]), float(line[38:46]), float(line[46:54])
                 hetatm_coords.append((x, y, z))
             except (ValueError, IndexError):
                 pass
@@ -104,16 +161,14 @@ def parse_pdb_binding_site(pdb_bytes: bytes) -> Dict:
             atom_name = line[12:16].strip()
             if atom_name == "CA":
                 try:
-                    x, y, z = float(line[30:38]), float(
-                        line[38:46]), float(line[46:54])
+                    x, y, z = float(line[30:38]), float(line[38:46]), float(line[46:54])
                     ca_coords.append((x, y, z))
                 except (ValueError, IndexError):
                     pass
 
     coords = hetatm_coords if hetatm_coords else ca_coords
     if not coords:
-        return {"centroid": (0.0, 0.0, 0.0), "n_atoms": 0,
-                "source": "none", "raw_text": text[:500]}
+        return {"centroid": (0.0, 0.0, 0.0), "n_atoms": 0, "source": "none", "raw_text": text[:500]}
 
     cx = sum(c[0] for c in coords) / len(coords)
     cy = sum(c[1] for c in coords) / len(coords)
@@ -131,16 +186,6 @@ def parse_pdb_binding_site(pdb_bytes: bytes) -> Dict:
 def parse_conf_txt(conf_bytes: bytes) -> Dict:
     """
     Parse an AutoDock-Vina style conf.txt for grid center and size.
-
-    Expected format (any order, case-insensitive):
-        center_x = 10.5
-        center_y = -3.2
-        center_z = 22.0
-        size_x   = 20
-        size_y   = 20
-        size_z   = 20
-
-    Returns a dict with keys: center (tuple), size (tuple), extra (dict)
     """
     text = conf_bytes.decode("utf-8", errors="ignore")
     kv: Dict[str, float] = {}
@@ -168,13 +213,8 @@ def parse_conf_txt(conf_bytes: bytes) -> Dict:
         kv.get("size_z", 20.0),
     )
     extra = {
-        k: v for k,
-        v in kv.items() if k not in (
-            "center_x",
-            "center_y",
-            "center_z",
-            "size_x",
-            "size_y",
-            "size_z")}
+        k: v for k, v in kv.items() 
+        if k not in ("center_x", "center_y", "center_z", "size_x", "size_y", "size_z")
+    }
 
     return {"center": center, "size": size, "extra": extra}
