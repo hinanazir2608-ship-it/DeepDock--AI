@@ -1,15 +1,3 @@
-"""
-Stage 2 — AutoDock-Vina docking (+ optional GNINA CNN rescoring)
-
-Public interface (matches app.py imports):
-    VINA_AVAILABLE            : bool, whether docking binaries exist
-    load_gnina_model(weights) : loads/caches a GNINA CNN checkpoint if provided
-    dock_ligands(...)         : docks a list of RDKit Mols, returns list[DockResult]
-
-DockResult exposes:
-    .name, .mol, .vina_score, .gnina_affinity, .pdbqt_out
-"""
-
 from __future__ import annotations
 import os
 import shutil
@@ -21,25 +9,12 @@ from typing import List, Optional, Tuple
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
-# ── Availability checks & Linux Binary Path Fallbacks ─────────────────────
+# ── Availability checks (System Binaries Only) ───────────────────────────
 _OBABEL_PATH = shutil.which("obabel") or "/usr/bin/obabel"
+_VINA_CLI_PATH = shutil.which("autodock_vina") or shutil.which("vina") or "/usr/bin/autodock_vina"
 
-# CLI search priority to prevent PyVina C++ library segfaults on Streamlit Cloud
-_VINA_CLI_PATH = (
-    shutil.which("autodock_vina") 
-    or shutil.which("vina") 
-    or "/usr/bin/autodock_vina" 
-    or "/usr/bin/vina"
-)
-
-try:
-    import vina as _vina_pkg
-    _VINA_PKG_AVAILABLE = True
-except Exception:
-    _vina_pkg = None
-    _VINA_PKG_AVAILABLE = False
-
-VINA_AVAILABLE = bool(_VINA_CLI_PATH and os.path.exists(_VINA_CLI_PATH)) or _VINA_PKG_AVAILABLE
+# Direct CLI check (No PyVina C++ module import to prevent SegFault)
+VINA_AVAILABLE = bool(_VINA_CLI_PATH and os.path.exists(_VINA_CLI_PATH))
 
 
 @dataclass
@@ -49,24 +24,6 @@ class DockResult:
     vina_score: float
     gnina_affinity: float
     pdbqt_out: Optional[str] = None
-
-
-# ── GNINA CNN weights loader ─────────────────────────────────────────────
-_LOADED_GNINA = {"path": None, "model": None}
-
-def load_gnina_model(weights_path: str = ""):
-    if not weights_path:
-        return None
-    if _LOADED_GNINA["path"] == weights_path and _LOADED_GNINA["model"] is not None:
-        return _LOADED_GNINA["model"]
-    try:
-        import torch
-        model = torch.load(weights_path, map_location="cpu")
-        _LOADED_GNINA["path"] = weights_path
-        _LOADED_GNINA["model"] = model
-        return model
-    except Exception:
-        return None
 
 
 # ── Receptor PDB → PDBQT conversion ──────────────────────────────────────
@@ -85,13 +42,13 @@ def _prepare_receptor_pdbqt(receptor_bytes: bytes, work_dir: str) -> str:
             )
             if os.path.exists(out_pdbqt) and res.returncode == 0:
                 return out_pdbqt
-        except Exception as e:
-            print(f"[Receptor Conversion Warning]: {e}")
+        except Exception:
+            pass
 
     return raw_pdb
 
 
-# ── Mol → PDBQT conversion (SegFault Safe) ────────────────────────────────
+# ── Mol → PDBQT conversion ────────────────────────────────────────────────
 def _mol_to_pdbqt(mol: Chem.Mol, out_pdbqt: str) -> bool:
     try:
         m = Chem.AddHs(mol)
@@ -104,7 +61,7 @@ def _mol_to_pdbqt(mol: Chem.Mol, out_pdbqt: str) -> bool:
             
             if res != -1:
                 try:
-                    AllChem.MMFFOptimizeMolecule(m, maxIters=150)
+                    AllChem.MMFFOptimizeMolecule(m, maxIters=100)
                 except Exception:
                     pass
 
@@ -120,7 +77,7 @@ def _mol_to_pdbqt(mol: Chem.Mol, out_pdbqt: str) -> bool:
         )
         return os.path.exists(out_pdbqt) and result.returncode == 0
     except Exception as e:
-        print(f"[Ligand Conversion Error]: {e}")
+        print(f"[Conversion Error]: {e}")
         return False
 
 
@@ -152,28 +109,7 @@ def _run_vina_cli(
                         pass
         return None
     except Exception as e:
-        print(f"[Vina CLI Error]: {e}")
-        return None
-
-
-def _run_vina_python(
-    receptor_pdbqt: str, ligand_pdbqt: str,
-    center: Tuple[float, float, float], box_size: Tuple[float, float, float],
-    exhaustiveness: int, n_poses: int, out_pdbqt: str,
-) -> Optional[float]:
-    if not _VINA_PKG_AVAILABLE:
-        return None
-    try:
-        v = _vina_pkg.Vina(sf_name="vina")
-        v.set_receptor(receptor_pdbqt)
-        v.set_ligand_from_file(ligand_pdbqt)
-        v.compute_vina_maps(center=list(center), box_size=list(box_size))
-        v.dock(exhaustiveness=exhaustiveness, n_poses=n_poses)
-        v.write_poses(out_pdbqt, n_poses=1, overwrite=True)
-        energies = v.energies(n_poses=1)
-        return float(energies[0][0]) if len(energies) else None
-    except Exception as e:
-        print(f"[PyVina Binding Fallback Error]: {e}")
+        print(f"[Vina CLI Exception]: {e}")
         return None
 
 
@@ -192,8 +128,6 @@ def dock_ligands(
 ) -> List[DockResult]:
     if not mols:
         return []
-
-    gnina_model = load_gnina_model(gnina_weights) if gnina_weights else None
 
     work_dir = tempfile.mkdtemp(prefix="deepdock_")
     receptor_path = _prepare_receptor_pdbqt(pdb_bytes, work_dir)
@@ -215,18 +149,10 @@ def dock_ligands(
 
         vina_score: Optional[float] = None
         if converted and os.path.exists(ligand_pdbqt):
-            # Prioritize CLI Execution on Streamlit Cloud to prevent Segmentation Faults
-            if _VINA_CLI_PATH and os.path.exists(_VINA_CLI_PATH):
-                vina_score = _run_vina_cli(
-                    receptor_path, ligand_pdbqt, out_pdbqt,
-                    center, box_size, exhaustiveness
-                )
-            # Fallback to Python bindings if CLI is not found
-            if vina_score is None and _VINA_PKG_AVAILABLE:
-                vina_score = _run_vina_python(
-                    receptor_path, ligand_pdbqt,
-                    center, box_size, exhaustiveness, n_poses, out_pdbqt
-                )
+            vina_score = _run_vina_cli(
+                receptor_path, ligand_pdbqt, out_pdbqt,
+                center, box_size, exhaustiveness
+            )
 
         if vina_score is None:
             if progress_bar:
@@ -235,13 +161,6 @@ def dock_ligands(
                 except Exception:
                     pass
             continue
-
-        gnina_affinity = vina_score
-        if gnina_model is not None:
-            try:
-                gnina_affinity = float(vina_score)
-            except Exception:
-                gnina_affinity = vina_score
 
         pdbqt_str = None
         if os.path.exists(out_pdbqt):
@@ -252,7 +171,7 @@ def dock_ligands(
             name=name,
             mol=mol,
             vina_score=float(vina_score),
-            gnina_affinity=float(gnina_affinity),
+            gnina_affinity=float(vina_score),
             pdbqt_out=pdbqt_str
         ))
 
