@@ -31,7 +31,8 @@ except Exception:
     _VINA_PKG_AVAILABLE = False
 
 # We consider Vina "available" if either the python bindings or the CLI binary exist.
-_VINA_CLI_PATH = shutil.which("vina")
+_OBABEL_PATH = shutil.which("obabel") or "/usr/bin/obabel"
+_VINA_CLI_PATH = shutil.which("vina") or shutil.which("autodock_vina") or "/usr/bin/autodock_vina"
 VINA_AVAILABLE = _VINA_PKG_AVAILABLE or bool(_VINA_CLI_PATH)
 
 
