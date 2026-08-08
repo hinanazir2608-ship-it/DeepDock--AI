@@ -2,7 +2,7 @@
 Stage 2 — AutoDock-Vina docking (+ optional GNINA CNN rescoring)
 
 Public interface (matches app.py imports):
-    VINA_AVAILABLE            : bool, whether the `vina` python package + `obabel` exist
+    VINA_AVAILABLE            : bool, whether docking binaries exist
     load_gnina_model(weights) : loads/caches a GNINA CNN checkpoint if provided
     dock_ligands(...)         : docks a list of RDKit Mols, returns list[DockResult]
 
@@ -15,25 +15,31 @@ import os
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
-# ── Availability checks ───────────────────────────────────────────────────
-_OBABEL_PATH = shutil.which("obabel")
+# ── Availability checks & Linux Binary Path Fallbacks ─────────────────────
+_OBABEL_PATH = shutil.which("obabel") or "/usr/bin/obabel"
+
+# CLI search priority to prevent PyVina C++ library segfaults on Streamlit Cloud
+_VINA_CLI_PATH = (
+    shutil.which("autodock_vina") 
+    or shutil.which("vina") 
+    or "/usr/bin/autodock_vina" 
+    or "/usr/bin/vina"
+)
+
 try:
-    import vina as _vina_pkg  # AutoDock-Vina python bindings
+    import vina as _vina_pkg
     _VINA_PKG_AVAILABLE = True
 except Exception:
     _vina_pkg = None
     _VINA_PKG_AVAILABLE = False
 
-# We consider Vina "available" if either the python bindings or the CLI binary exist.
-_OBABEL_PATH = shutil.which("obabel") or "/usr/bin/obabel"
-_VINA_CLI_PATH = shutil.which("vina") or shutil.which("autodock_vina") or "/usr/bin/autodock_vina"
-VINA_AVAILABLE = _VINA_PKG_AVAILABLE or bool(_VINA_CLI_PATH)
+VINA_AVAILABLE = bool(_VINA_CLI_PATH and os.path.exists(_VINA_CLI_PATH)) or _VINA_PKG_AVAILABLE
 
 
 @dataclass
@@ -41,20 +47,14 @@ class DockResult:
     name: str
     mol: Optional[Chem.Mol]
     vina_score: float
-    gnina_affinity: float          # falls back to vina_score if no CNN weights loaded
-    pdbqt_out: Optional[str] = None     # Direct PDBQT text of docked pose
+    gnina_affinity: float
+    pdbqt_out: Optional[str] = None
 
 
-# ── GNINA CNN weights loader (optional rescoring layer) ──────────────────
+# ── GNINA CNN weights loader ─────────────────────────────────────────────
 _LOADED_GNINA = {"path": None, "model": None}
 
-
 def load_gnina_model(weights_path: str = ""):
-    """
-    Loads a GNINA/CNN checkpoint if a path is given; caches it so repeated
-    calls within the same session don't reload from disk.
-    Returns None if no path given (Vina-only scoring mode) or load fails.
-    """
     if not weights_path:
         return None
     if _LOADED_GNINA["path"] == weights_path and _LOADED_GNINA["model"] is not None:
@@ -71,69 +71,65 @@ def load_gnina_model(weights_path: str = ""):
 
 # ── Receptor PDB → PDBQT conversion ──────────────────────────────────────
 def _prepare_receptor_pdbqt(receptor_bytes: bytes, work_dir: str) -> str:
-    """
-    Saves the receptor PDB and uses OpenBabel to properly convert it to PDBQT,
-    adding required charges/atom types so Vina does not fail.
-    """
     raw_pdb = os.path.join(work_dir, "receptor.pdb")
     out_pdbqt = os.path.join(work_dir, "receptor.pdbqt")
 
     with open(raw_pdb, "wb") as f:
         f.write(receptor_bytes)
 
-    if _OBABEL_PATH:
-        res = subprocess.run(
-            [_OBABEL_PATH, "-ipdb", raw_pdb, "-opdbqt", "-O", out_pdbqt, "-xr", "--partialcharge", "gasteiger"],
-            capture_output=True, text=True, timeout=60
-        )
-        if os.path.exists(out_pdbqt) and res.returncode == 0:
-            return out_pdbqt
+    if _OBABEL_PATH and os.path.exists(_OBABEL_PATH):
+        try:
+            res = subprocess.run(
+                [_OBABEL_PATH, "-ipdb", raw_pdb, "-opdbqt", "-O", out_pdbqt, "-xr", "--partialcharge", "gasteiger"],
+                capture_output=True, text=True, timeout=60
+            )
+            if os.path.exists(out_pdbqt) and res.returncode == 0:
+                return out_pdbqt
+        except Exception as e:
+            print(f"[Receptor Conversion Warning]: {e}")
 
-    # Fallback if obabel is missing
     return raw_pdb
 
 
-# ── Mol → PDBQT conversion ────────────────────────────────────────────────
+# ── Mol → PDBQT conversion (SegFault Safe) ────────────────────────────────
 def _mol_to_pdbqt(mol: Chem.Mol, out_pdbqt: str) -> bool:
     try:
         m = Chem.AddHs(mol)
         if m.GetNumConformers() == 0:
             params = AllChem.ETKDGv3()
             params.randomSeed = 42
-            # Use safe embedding without throwing internal memory faults
             res = AllChem.EmbedMolecule(m, params)
             if res == -1:
                 res = AllChem.EmbedMolecule(m, AllChem.ETKDG())
             
             if res != -1:
                 try:
-                    AllChem.MMFFOptimizeMolecule(m, maxIters=200)
+                    AllChem.MMFFOptimizeMolecule(m, maxIters=150)
                 except Exception:
                     pass
 
         pdb_path = out_pdbqt.replace(".pdbqt", ".pdb")
         Chem.MolToPDBFile(m, pdb_path)
 
-        if not _OBABEL_PATH or not os.path.exists(pdb_path):
+        if not _OBABEL_PATH or not os.path.exists(_OBABEL_PATH) or not os.path.exists(pdb_path):
             return False
 
         result = subprocess.run(
-            [_OBABEL_PATH, "-ipdb", pdb_path, "-opdbqt", "-O", out_pdbqt,
-             "--partialcharge", "eem"],
+            [_OBABEL_PATH, "-ipdb", pdb_path, "-opdbqt", "-O", out_pdbqt, "--partialcharge", "eem"],
             capture_output=True, text=True, timeout=60,
         )
         return os.path.exists(out_pdbqt) and result.returncode == 0
     except Exception as e:
-        print(f"[SegFault Guard Error]: {e}")
+        print(f"[Ligand Conversion Error]: {e}")
         return False
+
 
 def _run_vina_cli(
     receptor_pdbqt: str, ligand_pdbqt: str, out_pdbqt: str,
     center: Tuple[float, float, float], box_size: Tuple[float, float, float],
     exhaustiveness: int,
 ) -> Optional[float]:
-    """Shells out to the vina CLI."""
-    if not _VINA_CLI_PATH:
+    if not _VINA_CLI_PATH or not os.path.exists(_VINA_CLI_PATH):
         return None
     cmd = [
         _VINA_CLI_PATH,
@@ -144,7 +140,7 @@ def _run_vina_cli(
         "--num_modes", "1",
     ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         for line in proc.stdout.splitlines():
             line = line.strip()
             if line.startswith("1"):
@@ -155,30 +151,16 @@ def _run_vina_cli(
                     except ValueError:
                         pass
         return None
-    except Exception:
+    except Exception as e:
+        print(f"[Vina CLI Error]: {e}")
         return None
 
-    # docking.py ke loop ke andar:
-    vina_score: Optional[float] = None
-    if converted and os.path.exists(ligand_pdbqt):
-    # CLI is much more stable on Streamlit Cloud containers
-    if _VINA_CLI_PATH:
-        vina_score = _run_vina_cli(
-            receptor_path, ligand_pdbqt, out_pdbqt,
-            center, box_size, exhaustiveness
-        )
-    # Fallback to python bindings only if CLI fails
-    if vina_score is None and _VINA_PKG_AVAILABLE:
-        vina_score = _run_vina_python(
-            receptor_path, ligand_pdbqt, center, box_size,
-            exhaustiveness, n_poses, out_pdbqt
-        )
+
 def _run_vina_python(
     receptor_pdbqt: str, ligand_pdbqt: str,
     center: Tuple[float, float, float], box_size: Tuple[float, float, float],
     exhaustiveness: int, n_poses: int, out_pdbqt: str,
 ) -> Optional[float]:
-    """Uses the `vina` python bindings when available."""
     if not _VINA_PKG_AVAILABLE:
         return None
     try:
@@ -190,11 +172,12 @@ def _run_vina_python(
         v.write_poses(out_pdbqt, n_poses=1, overwrite=True)
         energies = v.energies(n_poses=1)
         return float(energies[0][0]) if len(energies) else None
-    except Exception:
+    except Exception as e:
+        print(f"[PyVina Binding Fallback Error]: {e}")
         return None
 
 
-# ── Main entry point ──────────────────────────────────────────────────────
+# ── Main Entry Point ──────────────────────────────────────────────────────
 def dock_ligands(
     mols: List[Chem.Mol],
     names: List[str],
@@ -203,14 +186,10 @@ def dock_ligands(
     box_size: Tuple[float, float, float],
     exhaustiveness: int = 8,
     n_poses: int = 5,
-    progress_bar=None,     # st.progress() handle
-    status_text=None,      # st.empty() handle
+    progress_bar=None,
+    status_text=None,
     gnina_weights: str = "",
 ) -> List[DockResult]:
-    """
-    Docks each mol against the receptor and returns results sorted best→worst
-    by gnina_affinity (ascending — more negative = stronger binding).
-    """
     if not mols:
         return []
 
@@ -224,7 +203,10 @@ def dock_ligands(
 
     for idx, (mol, name) in enumerate(zip(mols, names)):
         if status_text:
-            status_text.text(f"Docking {idx + 1}/{total}: {name}")
+            try:
+                status_text.text(f"Docking {idx + 1}/{total}: {name}")
+            except Exception:
+                pass
 
         ligand_pdbqt = os.path.join(work_dir, f"{idx}_{name}.pdbqt")
         out_pdbqt = os.path.join(work_dir, f"{idx}_{name}_out.pdbqt")
@@ -233,23 +215,27 @@ def dock_ligands(
 
         vina_score: Optional[float] = None
         if converted and os.path.exists(ligand_pdbqt):
-            if _VINA_PKG_AVAILABLE:
-                vina_score = _run_vina_python(
-                    receptor_path, ligand_pdbqt, center, box_size,
-                    exhaustiveness, n_poses, out_pdbqt,
-                )
-            if vina_score is None and _VINA_CLI_PATH:
+            # Prioritize CLI Execution on Streamlit Cloud to prevent Segmentation Faults
+            if _VINA_CLI_PATH and os.path.exists(_VINA_CLI_PATH):
                 vina_score = _run_vina_cli(
                     receptor_path, ligand_pdbqt, out_pdbqt,
-                    center, box_size, exhaustiveness,
+                    center, box_size, exhaustiveness
+                )
+            # Fallback to Python bindings if CLI is not found
+            if vina_score is None and _VINA_PKG_AVAILABLE:
+                vina_score = _run_vina_python(
+                    receptor_path, ligand_pdbqt,
+                    center, box_size, exhaustiveness, n_poses, out_pdbqt
                 )
 
         if vina_score is None:
             if progress_bar:
-                progress_bar.progress(min((idx + 1) / total, 1.0))
+                try:
+                    progress_bar.progress(min((idx + 1) / total, 1.0))
+                except Exception:
+                    pass
             continue
 
-        # GNINA CNN rescoring hook
         gnina_affinity = vina_score
         if gnina_model is not None:
             try:
@@ -257,7 +243,6 @@ def dock_ligands(
             except Exception:
                 gnina_affinity = vina_score
 
-        # Read PDBQT directly without conversion
         pdbqt_str = None
         if os.path.exists(out_pdbqt):
             with open(out_pdbqt, "r") as f:
@@ -272,9 +257,11 @@ def dock_ligands(
         ))
 
         if progress_bar:
-            progress_bar.progress(min((idx + 1) / total, 1.0))
+            try:
+                progress_bar.progress(min((idx + 1) / total, 1.0))
+            except Exception:
+                pass
 
     shutil.rmtree(work_dir, ignore_errors=True)
-
     results.sort(key=lambda r: r.gnina_affinity)
     return results
