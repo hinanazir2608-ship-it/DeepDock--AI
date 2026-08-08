@@ -1,8 +1,6 @@
 build-essential
 libboost-all-dev
-libboost-python-dev
 swig
 python3-dev
 openbabel
 libopenbabel-dev
-autodock vina
