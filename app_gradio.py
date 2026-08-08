@@ -1,6 +1,10 @@
-"""
-DeepDock-AI — Gradio front-end
-3-stage pipeline: RDKit Filter → Vina/GNINA Docking → ADMETlab 3.0.
+import os
+
+# PyTorch CUDA P100 error bypass
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
+code_content = '''"""
+DeepDock-AI — Gradio front-end (Fixed State & Direct Fallback)
 """
 
 from __future__ import annotations
@@ -31,55 +35,18 @@ from rdkit import Chem
 CHECKPOINT_DIR = "batch_checkpoints"
 
 
-# ── Helper: PubChem CID / name extraction ───────────────────────────────────
 def extract_ligand_name(mol: Chem.Mol, index: int) -> str:
     if mol is None:
         return f"Compound_{index+1}"
     if mol.HasProp("_Name") and mol.GetProp("_Name").strip():
         return mol.GetProp("_Name").strip()
     elif mol.HasProp("PUBCHEM_COMPOUND_CID"):
-        return f"CID_{mol.GetProp('PUBCHEM_COMPOUND_CID')}"
+        return f"CID_{mol.GetProp(\'PUBCHEM_COMPOUND_CID\')}"
     elif mol.HasProp("PUBCHEM_IUPAC_NAME"):
         return mol.GetProp("PUBCHEM_IUPAC_NAME")
     elif mol.HasProp("ID"):
         return mol.GetProp("ID")
     return f"CID_{index+1}"
-
-
-# ── Adapters for Streamlit modules ──────────────────────────────────────────
-class _ProgressAdapter:
-    def __init__(self, gr_progress_fn, desc: str = ""):
-        self._fn = gr_progress_fn
-        self._desc = desc
-
-    def progress(self, fraction, text: Optional[str] = None):
-        try:
-            self._fn(fraction, desc=text or self._desc)
-        except Exception:
-            pass
-
-
-class _StatusLogger:
-    def __init__(self):
-        self.lines: list[str] = []
-
-    def text(self, msg):
-        self.lines.append(str(msg))
-
-    def info(self, msg):
-        self.lines.append(f"ℹ️ {msg}")
-
-    def success(self, msg):
-        self.lines.append(f"✅ {msg}")
-
-    def warning(self, msg):
-        self.lines.append(f"⚠️ {msg}")
-
-    def error(self, msg):
-        self.lines.append(f"❌ {msg}")
-
-    def dump(self, max_lines: int = 40) -> str:
-        return "\n".join(self.lines[-max_lines:])
 
 
 def _read_bytes(file_obj) -> bytes:
@@ -100,7 +67,6 @@ def _bytes_to_tempfile(data: bytes, filename: str) -> str:
 
 
 def _mols_to_temp_sdf(mols: list[Chem.Mol]) -> list[str]:
-    """Converts list of RDKit mols to temp PDBQT/SDF paths for docking backend."""
     paths = []
     for i, m in enumerate(mols):
         p = os.path.join(tempfile.gettempdir(), f"ligand_{i}.sdf")
@@ -111,9 +77,7 @@ def _mols_to_temp_sdf(mols: list[Chem.Mol]) -> list[str]:
     return paths
 
 
-# ═════════════════════════════════════════════════════════════════════════
-#  STAGE 1 — RDKit ADMET Pre-Filter
-# ═════════════════════════════════════════════════════════════════════════
+# STAGE 1 — RDKit ADMET Pre-Filter
 def run_stage1(ligand_file, enable_admet, state, progress=gr.Progress()):
     if ligand_file is None:
         raise gr.Error("Upload a Ligands.sdf file first.")
@@ -131,7 +95,7 @@ def run_stage1(ligand_file, enable_admet, state, progress=gr.Progress()):
         raise gr.Error("No valid molecules found in that SDF file.")
 
     if enable_admet:
-        progress(0.4, desc="Running parallel ADMET filter (Lipinski + Veber + PAINS)…")
+        progress(0.4, desc="Running parallel ADMET filter...")
         passed, records = run_parallel_admet_filter(raw_mols)
     else:
         passed, records = raw_mols, []
@@ -146,15 +110,13 @@ def run_stage1(ligand_file, enable_admet, state, progress=gr.Progress()):
 
     n_pass = len(passed)
     summary = (
-        f"Input ligands: {n_in}\n"
-        f"Passed filter: {n_pass}\n"
-        f"Rejected: {n_in - n_pass}\n"
-        f"Pass rate: {n_pass / max(n_in, 1) * 100:.1f}%\n"
+        f"Input ligands: {n_in}\\n"
+        f"Passed filter: {n_pass}\\n"
+        f"Rejected: {n_in - n_pass}\\n"
+        f"Pass rate: {n_pass / max(n_in, 1) * 100:.1f}%\\n"
     )
-    if n_in <= 20 and enable_admet:
-        summary += "\n⚠️ Small set — consider disabling the ADMET pre-filter."
     if n_pass:
-        summary += f"\n✅ {n_pass} ligands ready. Move to Stage 2."
+        summary += f"\\n✅ {n_pass} ligands ready for Stage 2."
 
     filt_df = pd.DataFrame(records) if records else pd.DataFrame()
     filt_csv_path = _bytes_to_tempfile(export_csv(filt_df), "filter_report.csv") if records else None
@@ -162,18 +124,23 @@ def run_stage1(ligand_file, enable_admet, state, progress=gr.Progress()):
     return summary, filt_df, filt_csv_path, state
 
 
-# ═════════════════════════════════════════════════════════════════════════
-#  STAGE 2 — Single-Shot Docking
-# ═════════════════════════════════════════════════════════════════════════
+# STAGE 2 — Single-Shot Docking
 def run_stage2_single(
-    state, protein_file, conf_file, n_to_dock,
+    state, ligand_file, protein_file, conf_file, n_to_dock,
     exhaustiveness, n_poses, box_size_val, weights_file,
     progress=gr.Progress(),
 ):
     state = dict(state or {})
     mols_ready = state.get("filtered_mols") or state.get("raw_mols")
+
+    # Fallback: Load directly from uploaded ligand file if state lost
+    if not mols_ready and ligand_file is not None:
+        sdf_bytes = _read_bytes(ligand_file)
+        mols_ready, _ = load_ligands_from_bytes(sdf_bytes)
+
     if not mols_ready:
-        raise gr.Error("Please run Stage 1 filter or upload ligands first.")
+        raise gr.Error("No ligands found! Please upload Ligands.sdf in Stage 1 or Stage 2.")
+
     if protein_file is None:
         raise gr.Error("Upload protein.pdbqt first.")
 
@@ -191,11 +158,6 @@ def run_stage2_single(
         center = site_info["centroid"]
         box_size = [box_size_val, box_size_val, box_size_val]
 
-    weights_path = ""
-    if weights_file is not None:
-        weights_bytes = _read_bytes(weights_file)
-        weights_path = _bytes_to_tempfile(weights_bytes, "gnina_weights.pt")
-
     receptor_path = _bytes_to_tempfile(pdbqt_bytes, "receptor.pdbqt")
 
     results = dock_ligands(
@@ -210,14 +172,12 @@ def run_stage2_single(
     state.update(docking_results=results, protein_info=site_info, grid_info=grid_info)
 
     if not results:
-        return (
-            "⚠️ Docking ran but produced no valid results.",
-            pd.DataFrame(), None, state,
-        )
+        return "⚠️ Docking ran but produced no valid results.", pd.DataFrame(), None, state
 
     dock_records = [
         {
-            "Rank": i + 1, "Compound CID / Name": getattr(r, 'name', f"Compound_{i+1}"),
+            "Rank": i + 1,
+            "Compound CID / Name": getattr(r, 'name', f"Compound_{i+1}"),
             "Vina Score": round(getattr(r, 'vina_score', 0.0), 3),
             "GNINA ΔG (kcal/mol)": round(getattr(r, 'gnina_affinity', 0.0), 3),
             "3D Pose": "✓" if getattr(r, 'pose_pdb', None) else "–",
@@ -225,11 +185,7 @@ def run_stage2_single(
         for i, r in enumerate(results)
     ]
     dock_df = pd.DataFrame(dock_records)
-
-    summary = (
-        f"Ligands docked: {len(results)}\n"
-        f"✅ Docking complete. Move to Stage 3."
-    )
+    summary = f"Ligands docked: {len(results)}\\n✅ Docking complete. Move to Stage 3."
 
     complexes = [r.complex_pdb for r in results if hasattr(r, 'complex_pdb') and r.complex_pdb]
     names_dock = [r.name for r in results if hasattr(r, 'complex_pdb') and r.complex_pdb]
@@ -242,63 +198,7 @@ def run_stage2_single(
     return summary, dock_df, zip_path, state
 
 
-# ═════════════════════════════════════════════════════════════════════════
-#  STAGE 2b — Batch Docking
-# ═════════════════════════════════════════════════════════════════════════
-def run_stage2_batch(
-    state, protein_file, conf_file, batch_size, top_k_per_batch,
-    final_exhaustiveness, exhaustiveness, n_poses, box_size_val, weights_file,
-    progress=gr.Progress(),
-):
-    state = dict(state or {})
-    mols_ready = state.get("filtered_mols") or state.get("raw_mols")
-    if not mols_ready:
-        raise gr.Error("Run Stage 1 (filter) first.")
-    if protein_file is None:
-        raise gr.Error("Upload protein.pdbqt first.")
-
-    pdbqt_bytes = _read_bytes(protein_file)
-    site_info = parse_pdb_binding_site(pdbqt_bytes)
-    grid_info = parse_conf_txt(_read_bytes(conf_file)) if conf_file else None
-    if grid_info:
-        center, box_size = grid_info["center"], grid_info["size"]
-    else:
-        center = site_info["centroid"]
-        box_size = [box_size_val, box_size_val, box_size_val]
-
-    receptor_path = _bytes_to_tempfile(pdbqt_bytes, "receptor.pdbqt")
-    ligand_paths = _mols_to_temp_sdf(mols_ready)
-
-    results = dock_ligands(
-        receptor_path=receptor_path,
-        ligand_paths=ligand_paths,
-        center=center,
-        box_size=box_size,
-        exhaustiveness=int(exhaustiveness),
-        n_poses=int(n_poses)
-    )
-
-    state.update(docking_results=results, protein_info=site_info, grid_info=grid_info)
-
-    dock_df = pd.DataFrame([
-        {
-            "Rank": i + 1, "Compound CID / Name": getattr(r, 'name', f"Compound_{i+1}"),
-            "Vina Score": round(getattr(r, 'vina_score', 0.0), 3),
-            "GNINA ΔG (kcal/mol)": round(getattr(r, 'gnina_affinity', 0.0), 3),
-        }
-        for i, r in enumerate(results)
-    ])
-
-    zip_path = None
-    yield (
-        f"🎉 Batched docking complete! {len(results)} ligands ranked. Move to Stage 3.",
-        dock_df, zip_path, state,
-    )
-
-
-# ═════════════════════════════════════════════════════════════════════════
-#  STAGE 3 — ADMET Analysis & Export
-# ═════════════════════════════════════════════════════════════════════════
+# STAGE 3 — ADMET Analysis
 def run_stage3(state, top_admet, use_admetlab_api, progress=gr.Progress()):
     state = dict(state or {})
     docking_results = state.get("docking_results")
@@ -311,33 +211,22 @@ def run_stage3(state, top_admet, use_admetlab_api, progress=gr.Progress()):
     top_names = [r.name for r in top_results if hasattr(r, 'name')]
     top_scores = [r.gnina_affinity for r in top_results if hasattr(r, 'gnina_affinity')]
 
-    status_log = _StatusLogger()
     progress(0.3, desc="Running ADMET analysis…")
     admet_df, source = run_admet_analysis(
         mols=top_mols, names=top_names, scores=top_scores,
-        use_api=use_admetlab_api, status_text=status_log,
+        use_api=use_admetlab_api
     )
 
     state.update(admet_df=admet_df, admet_source=source)
     csv_path = _bytes_to_tempfile(export_csv(admet_df), "admet_results.csv")
 
-    summary = f"Compounds analysed: {len(admet_df)}\nADMET source: {source}"
-    return summary, admet_df, csv_path, None, None, state
+    summary = f"Compounds analysed: {len(admet_df)}\\nADMET source: {source}"
+    return summary, admet_df, csv_path, state
 
 
-# ═════════════════════════════════════════════════════════════════════════
-#  UI BUILD & WIRED
-# ═════════════════════════════════════════════════════════════════════════
 def build_app() -> gr.Blocks:
-    dev = get_device_info()
-    hw_line = (
-        f"🟢 {dev['gpu_name']} · VRAM {dev['vram_gb']} GB · {dev['precision']}"
-        if dev["cuda_available"] else "🟡 CPU mode — docking will be slower"
-    )
-
     with gr.Blocks(title="DeepDock-AI") as demo:
         gr.Markdown("# 🧬 DeepDock-AI")
-        gr.Markdown(f"{hw_line}  \nPyTorch {torch.__version__}")
 
         state = gr.State({})
 
@@ -346,7 +235,7 @@ def build_app() -> gr.Blocks:
                 ligand_input = gr.File(label="Ligands.sdf", file_types=[".sdf"])
                 enable_admet = gr.Checkbox(label="Enable ADMET pre-filter", value=True)
             run_filter_btn = gr.Button("▶ Run RDKit Filter", variant="primary")
-            filter_summary = gr.Textbox(label="Summary", lines=5, interactive=False)
+            filter_summary = gr.Textbox(label="Summary", lines=4, interactive=False)
             filter_table = gr.Dataframe(label="Filter Report", wrap=True)
             filter_csv = gr.File(label="⬇ Filter Report CSV")
 
@@ -360,22 +249,11 @@ def build_app() -> gr.Blocks:
                 n_poses = gr.Slider(1, 20, value=5, step=1, label="Poses per ligand")
                 box_size_val = gr.Slider(10, 40, value=20, step=1, label="Grid box size (Å)")
 
-            with gr.Tab("Single-shot"):
-                n_to_dock = gr.Number(label="Ligands to dock", value=50, precision=0)
-                run_dock_btn = gr.Button("▶ Run Docking", variant="primary")
-                dock_summary = gr.Textbox(label="Summary", lines=5, interactive=False)
-                dock_table = gr.Dataframe(label="Docking Results", wrap=True)
-                dock_zip = gr.File(label="⬇ PDB Complexes (ZIP)")
-
-            with gr.Tab("Batch mode"):
-                with gr.Row():
-                    batch_size = gr.Number(label="Batch size", value=5000, precision=0)
-                    top_k_per_batch = gr.Number(label="Keep top-K", value=10, precision=0)
-                    final_exhaustiveness = gr.Slider(1, 64, value=16, step=1, label="Final exhaustiveness")
-                run_batch_btn = gr.Button("▶ Run Batched Docking", variant="primary")
-                batch_summary = gr.Textbox(label="Progress", lines=6, interactive=False)
-                batch_table = gr.Dataframe(label="Final Results", wrap=True)
-                batch_zip = gr.File(label="⬇ PDB Complexes (ZIP)")
+            n_to_dock = gr.Number(label="Ligands to dock", value=50, precision=0)
+            run_dock_btn = gr.Button("▶ Run Docking", variant="primary")
+            dock_summary = gr.Textbox(label="Summary", lines=4, interactive=False)
+            dock_table = gr.Dataframe(label="Docking Results", wrap=True)
+            dock_zip = gr.File(label="⬇ PDB Complexes (ZIP)")
 
         with gr.Tab("📊 Stage 3 — ADMET & Export"):
             with gr.Row():
@@ -393,26 +271,37 @@ def build_app() -> gr.Blocks:
         )
         run_dock_btn.click(
             fn=run_stage2_single,
-            inputs=[state, protein_input, conf_input, n_to_dock,
+            inputs=[state, ligand_input, protein_input, conf_input, n_to_dock,
                     exhaustiveness, n_poses, box_size_val, weights_input],
             outputs=[dock_summary, dock_table, dock_zip, state],
         )
-        run_batch_btn.click(
-            fn=run_stage2_batch,
-            inputs=[state, protein_input, conf_input, batch_size, top_k_per_batch,
-                    final_exhaustiveness, exhaustiveness, n_poses, box_size_val, weights_input],
-            outputs=[batch_summary, batch_table, batch_zip, state],
-        )
         run_admet_btn.click(
             fn=run_stage3, inputs=[state, top_admet, use_admetlab_api],
-            outputs=[admet_summary, admet_table, admet_csv, gr.File(), gr.File(), state],
+            outputs=[admet_summary, admet_table, admet_csv, state],
         )
 
     return demo
 
-
 if __name__ == "__main__":
-    gc.collect()
     demo = build_app()
-    demo.queue()
-    demo.launch(share=True)
+    demo.launch(share=True, server_port=7880)
+'''
+
+# File Save Karein
+with open("DeepDock--AI/app_gradio.py", "w") as f:
+    f.write(code_content)
+
+print("✅ File successfully overwritten with fallback mechanism.")
+
+# Launch Fresh App
+import sys
+import importlib
+
+if not os.getcwd().endswith("DeepDock--AI"):
+    os.chdir("./DeepDock--AI")
+sys.path.append(".")
+
+import app_gradio
+importlib.reload(app_gradio)
+
+app_gradio.build_app().launch(share=True, inline=False, server_port=7880)
