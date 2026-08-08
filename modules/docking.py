@@ -100,17 +100,21 @@ def _mol_to_pdbqt(mol: Chem.Mol, out_pdbqt: str) -> bool:
         if m.GetNumConformers() == 0:
             params = AllChem.ETKDGv3()
             params.randomSeed = 42
-            if AllChem.EmbedMolecule(m, params) == -1:
-                AllChem.EmbedMolecule(m, AllChem.ETKDG())
-            try:
-                AllChem.MMFFOptimizeMolecule(m)
-            except Exception:
-                pass
+            # Use safe embedding without throwing internal memory faults
+            res = AllChem.EmbedMolecule(m, params)
+            if res == -1:
+                res = AllChem.EmbedMolecule(m, AllChem.ETKDG())
+            
+            if res != -1:
+                try:
+                    AllChem.MMFFOptimizeMolecule(m, maxIters=200)
+                except Exception:
+                    pass
 
         pdb_path = out_pdbqt.replace(".pdbqt", ".pdb")
         Chem.MolToPDBFile(m, pdb_path)
 
-        if not _OBABEL_PATH:
+        if not _OBABEL_PATH or not os.path.exists(pdb_path):
             return False
 
         result = subprocess.run(
@@ -119,9 +123,9 @@ def _mol_to_pdbqt(mol: Chem.Mol, out_pdbqt: str) -> bool:
             capture_output=True, text=True, timeout=60,
         )
         return os.path.exists(out_pdbqt) and result.returncode == 0
-    except Exception:
+    except Exception as e:
+        print(f"[SegFault Guard Error]: {e}")
         return False
-
 
 def _run_vina_cli(
     receptor_pdbqt: str, ligand_pdbqt: str, out_pdbqt: str,
@@ -154,7 +158,21 @@ def _run_vina_cli(
     except Exception:
         return None
 
-
+    # docking.py ke loop ke andar:
+    vina_score: Optional[float] = None
+    if converted and os.path.exists(ligand_pdbqt):
+    # CLI is much more stable on Streamlit Cloud containers
+    if _VINA_CLI_PATH:
+        vina_score = _run_vina_cli(
+            receptor_path, ligand_pdbqt, out_pdbqt,
+            center, box_size, exhaustiveness
+        )
+    # Fallback to python bindings only if CLI fails
+    if vina_score is None and _VINA_PKG_AVAILABLE:
+        vina_score = _run_vina_python(
+            receptor_path, ligand_pdbqt, center, box_size,
+            exhaustiveness, n_poses, out_pdbqt
+        )
 def _run_vina_python(
     receptor_pdbqt: str, ligand_pdbqt: str,
     center: Tuple[float, float, float], box_size: Tuple[float, float, float],
