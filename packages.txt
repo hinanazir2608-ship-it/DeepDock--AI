@@ -1,6 +1,0 @@
-build-essential
-libboost-all-dev
-swig
-python3-dev
-openbabel
-libopenbabel-dev
