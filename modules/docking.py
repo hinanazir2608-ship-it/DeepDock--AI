@@ -19,7 +19,37 @@ try:
 except ImportError:
     TORCH_AVAILABLE = False
 
+import os
+import subprocess
+import urllib.request
+import streamlit as st
 
+
+@st.cache_resource
+def get_vina_binary():
+    """Download and set up standalone Vina binary if not present."""
+    vina_path = "./vina"
+    if not os.path.exists(vina_path):
+        url = "https://github.com/ccsb-scripps/AutoDock-Vina/releases/download/v1.2.5/vina_1.2.5_linux_x86_64"
+        urllib.request.urlretrieve(url, vina_path)
+        os.chmod(vina_path, 0o755)  # Make executable
+    return vina_path
+
+
+def run_docking(receptor_path, ligand_path, config_path, output_path):
+    vina_bin = get_vina_binary()
+
+    # Direct Linux CLI command call (Bypasses Python Memory Leakage)
+    cmd = f"{vina_bin} --receptor {receptor_path} --ligand {ligand_path} --config {config_path} --out {output_path}"
+
+    process = subprocess.run(
+        cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+
+    if process.returncode == 0:
+        return True, process.stdout
+    else:
+        return False, process.stderr
 def load_gnina_model(model_path: Optional[str] = None) -> Any:
     if not TORCH_AVAILABLE:
         return None
