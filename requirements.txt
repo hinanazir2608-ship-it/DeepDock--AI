@@ -3,7 +3,7 @@ streamlit-molstar>=0.4.0
 streamlit-aggrid>=0.3.4
 pandas>=2.0.0
 numpy<2.0.0
-vina>=1.2.5 --only-binary vina
+vina==1.2.5 --only-binary :all:
 meeko>=0.5.0
 gemmi>=0.6.3
 openbabel-wheel>=3.1.1.8
