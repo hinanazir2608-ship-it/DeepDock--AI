@@ -15,12 +15,6 @@ from rdkit import Chem
 from rdkit.Chem import Descriptors, Lipinski
 
 GNINA_SEED = 42
-# True  = always pass --no_gpu, so GNINA runs identical CPU-only math on Kaggle
-#         AND on your local Ubuntu box, regardless of which one has a GPU.
-#         Slower, but removes GPU-vs-CPU as a source of cross-platform difference.
-# False = let GNINA auto-use a GPU when it finds one (faster on Kaggle), but then
-#         Kaggle and a GPU-less Ubuntu box are no longer running the identical
-#         code path for CNN scoring.
 FORCE_CPU = False
 
 
@@ -95,8 +89,6 @@ def extract_top_ligand_pose(gnina_output_path, top_pose_path):
 
     with open(gnina_output_path, 'r') as infile, open(top_pose_path, 'w') as outfile:
         if ext == ".sdf":
-            # SDF files mein sirf pehla molecule (pehla $$$$ tak ka hissa) likhna hai
-            line_count = 0
             for line in infile:
                 outfile.write(line)
                 if line.strip() == "$$$$":
@@ -198,13 +190,7 @@ def process_ligands(ligand_file_path, filter_type):
     return pd.DataFrame(parsed_data), valid_mols
 
 
-# ---- GNINA scoring fix starts here ----
-
 def gnina_gpu_available():
-    """
-    Best-effort GPU presence check — used only for the status-log message
-    below, not to decide the command line (see FORCE_CPU).
-    """
     if not shutil.which("nvidia-smi"):
         return False
     try:
@@ -215,9 +201,7 @@ def gnina_gpu_available():
 
 
 def write_single_ligand_sdf(mol, mol_name, temp_dir):
-    """Writes ONE molecule to its own SDF so GNINA docks exactly this ligand
-    (previously the whole uploaded ligand_file was re-docked on every loop
-    iteration regardless of which row was being processed)."""
+    """Writes ONE molecule to its unique SDF file path."""
     path = os.path.join(temp_dir, f"{mol_name}_input.sdf")
     writer = Chem.SDWriter(path)
     writer.write(mol)
@@ -226,7 +210,7 @@ def write_single_ligand_sdf(mol, mol_name, temp_dir):
 
 
 def run_gnina_docking(receptor_path, ligand_path, output_path,
-                       center_x, center_y, center_z, size_x, size_y, size_z):
+                     center_x, center_y, center_z, size_x, size_y, size_z):
     cmd = [
         "gnina",
         "-r", receptor_path,
@@ -244,7 +228,6 @@ def run_gnina_docking(receptor_path, ligand_path, output_path,
     ]
     if FORCE_CPU:
         cmd.append("--no_gpu")
-    # else: no flag needed — GNINA uses a GPU automatically if it detects one.
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -254,12 +237,6 @@ def run_gnina_docking(receptor_path, ligand_path, output_path,
 
 
 def parse_gnina_score(top_pose_sdf_path):
-    """
-    Reads the REAL score GNINA wrote into the docked pose's SDF properties
-    instead of fabricating one. Property names can shift slightly across
-    GNINA builds — print mol.GetPropsAsDict() once to confirm on your version
-    if this comes back empty.
-    """
     affinity, cnn_score = None, None
 
     if not os.path.exists(top_pose_sdf_path):
@@ -276,8 +253,6 @@ def parse_gnina_score(top_pose_sdf_path):
             cnn_score = round(float(props["CNNscore"]), 3)
 
     return {"affinity": affinity, "cnn_score": cnn_score}
-
-# ---- GNINA scoring fix ends here ----
 
 
 # ==========================================
@@ -299,7 +274,6 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
         if ligand_file is None or target_file is None:
             return "❌ Error: Upload both files.", filtered_df, docking_df, admet_df, None, None, None, None
 
-        # Step 1: Target Protein Parsing
         status_log += "\n[1/3] Parsing Target Protein..."
         atom_count, calculated_centroid = parse_protein_pdbqt(target_file.name)
         status_log += f"\n     ✔ Protein Parsed successfully!"
@@ -310,11 +284,9 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
 
         status_log += f"\n     🎯 Active Grid Box Center: X={final_cx:.2f}, Y={final_cy:.2f}, Z={final_cz:.2f}"
 
-        # Step 2: Ligand Filtering
         status_log += f"\n[2/3] Processing Ligands (Filter: {filter_type})..."
         filtered_df, valid_mols = process_ligands(ligand_file.name, filter_type)
 
-        # Step 3: Docking, Pose Extraction & Complex Generation
         status_log += "\n[3/3] Running GNINA Docking & ADMET Analysis..."
 
         temp_dir = tempfile.mkdtemp()
@@ -327,14 +299,11 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
 
             gpu_present = gnina_gpu_available()
             if FORCE_CPU:
-                status_log += "\n     🖥️ GNINA forced to CPU mode (--no_gpu) for cross-platform consistency"
-                if gpu_present:
-                    status_log += " — GPU was available but intentionally not used"
+                status_log += "\n     🖥️ GNINA forced to CPU mode (--no_gpu)"
             else:
                 status_log += f"\n     🖥️ GNINA auto mode — {'GPU' if gpu_present else 'CPU'} detected"
 
             for idx, row in filtered_df.iterrows():
-                # Safe mapping for valid_mols list index
                 loop_index = idx - 1 if idx > 0 else 0
                 if loop_index >= len(valid_mols):
                     loop_index = len(valid_mols) - 1
@@ -343,11 +312,12 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
                 mol_name = str(row["Name"]).replace(" ", "_")
                 mol_safe_name = f"{idx}_{mol_name}"
 
-                output_sdf = os.path.join(temp_dir, f"{mol_safe_name}_docked.sdf")
-                top_pose_sdf = os.path.join(temp_dir, f"{mol_safe_name}_top1.sdf")
-                complex_pdb = os.path.join(complexes_dir, f"Complex_{mol_safe_name}_Mode1.pdb")
+                # Fully unique isolated file paths per ligand
+                output_sdf = os.path.join(temp_dir, f"docked_{mol_safe_name}.sdf")
+                top_pose_sdf = os.path.join(temp_dir, f"top1_{mol_safe_name}.sdf")
+                complex_pdb = os.path.join(complexes_dir, f"Complex_{mol_safe_name}.pdb")
 
-                # Dock ONLY this specific molecule
+                # Write individual unique ligand SDF
                 ligand_sdf = write_single_ligand_sdf(row_mol, mol_safe_name, temp_dir)
 
                 gnina_stdout, gnina_stderr, exit_code = run_gnina_docking(
@@ -382,12 +352,10 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
             docking_df = pd.DataFrame(docking_data)
             admet_df = pd.DataFrame(admet_data)
 
-        # Index Cleanups
         filtered_df = clean_dataframe_indices(filtered_df)
         docking_df = clean_dataframe_indices(docking_df)
         admet_df = clean_dataframe_indices(admet_df)
 
-        # Generate CSV files for individual tables
         filter_csv_path = os.path.join(temp_dir, "filtered_ligands.csv")
         docking_csv_path = os.path.join(temp_dir, "docking_results.csv")
         admet_csv_path = os.path.join(temp_dir, "admet_results.csv")
@@ -396,14 +364,12 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
         docking_df.to_csv(docking_csv_path, index=False)
         admet_df.to_csv(admet_csv_path, index=False)
 
-        # Create combined ZIP Archive (CSVs + Complex PDBs)
         zip_path = os.path.join(temp_dir, "DeepDock_Output_Archive.zip")
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             zipf.write(filter_csv_path, arcname="filtered_ligands.csv")
             zipf.write(docking_csv_path, arcname="docking_results.csv")
             zipf.write(admet_csv_path, arcname="admet_results.csv")
 
-            # Pack all generated protein-ligand complexes
             for root, _, files in os.walk(complexes_dir):
                 for file in files:
                     file_path = os.path.join(root, file)
@@ -415,7 +381,6 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
         status_log += f"\n\n❌ [ERROR]: Pipeline failed due to: {str(e)}"
 
     return status_log, filtered_df, docking_df, admet_df, filter_csv_path, docking_csv_path, admet_csv_path, zip_path
-
 
 
 # ==========================================
@@ -441,10 +406,8 @@ with gr.Blocks(title="DeepDock-AI") as demo:
             size_z = gr.Number(label="Size Z (Å)", value=20.0)
 
     submit_btn = gr.Button("Run Pipeline", variant="primary")
-
     status_output = gr.Textbox(label="Status Logs", lines=7)
 
-    # --- TABS WITH SPECIFIC DOWNLOAD BUTTONS ---
     with gr.Tabs():
         with gr.TabItem("1. Filtered Ligands"):
             filter_df_output = gr.DataFrame(label="Filtered Ligands Results")
@@ -458,7 +421,6 @@ with gr.Blocks(title="DeepDock-AI") as demo:
             admet_df_output = gr.DataFrame(label="ADMET Property Profiles")
             admet_csv_download = gr.File(label="📥 Download ADMET Results (CSV)")
 
-    # --- MAIN ZIP DOWNLOAD ---
     with gr.Row():
         zip_output = gr.File(label="📦 Download Complete Package (All CSVs + Complex PDBs ZIP)")
 
