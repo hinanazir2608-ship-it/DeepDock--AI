@@ -477,4 +477,6 @@ with gr.Blocks(title="DeepDock-AI") as demo:
     )
 
 if __name__ == "__main__":
+    gr.close_all()
+    demo = create_app()
     demo.launch(share=True)
