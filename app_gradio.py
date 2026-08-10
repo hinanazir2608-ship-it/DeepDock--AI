@@ -15,6 +15,13 @@ from rdkit import Chem
 from rdkit.Chem import Descriptors, Lipinski
 
 GNINA_SEED = 42
+# True  = always pass --no_gpu, so GNINA runs identical CPU-only math on Kaggle
+#         AND on your local Ubuntu box, regardless of which one has a GPU.
+#         Slower, but removes GPU-vs-CPU as a source of cross-platform difference.
+# False = let GNINA auto-use a GPU when it finds one (faster on Kaggle), but then
+#         Kaggle and a GPU-less Ubuntu box are no longer running the identical
+#         code path for CNN scoring.
+FORCE_CPU = True
 
 
 # ==========================================
@@ -193,8 +200,8 @@ def process_ligands(ligand_file_path, filter_type):
 
 def gnina_gpu_available():
     """
-    Best-effort GPU check so --gpu isn't hardcoded and silently mismatched
-    between a Kaggle GPU instance and a CPU-only local machine.
+    Best-effort GPU presence check — used only for the status-log message
+    below, not to decide the command line (see FORCE_CPU).
     """
     if not shutil.which("nvidia-smi"):
         return False
@@ -217,8 +224,7 @@ def write_single_ligand_sdf(mol, mol_name, temp_dir):
 
 
 def run_gnina_docking(receptor_path, ligand_path, output_path,
-                       center_x, center_y, center_z, size_x, size_y, size_z,
-                       use_gpu):
+                       center_x, center_y, center_z, size_x, size_y, size_z):
     cmd = [
         "gnina",
         "-r", receptor_path,
@@ -234,8 +240,9 @@ def run_gnina_docking(receptor_path, ligand_path, output_path,
         "--cnn_scoring", "rescore",
         "--seed", str(GNINA_SEED),
     ]
-    if use_gpu:
-        cmd.append("--gpu")
+    if FORCE_CPU:
+        cmd.append("--no_gpu")
+    # else: no flag needed — GNINA uses a GPU automatically if it detects one.
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -317,10 +324,15 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
             docking_data = []
             admet_data = []
 
-            # Computed once, not per-ligand — and logged, so GPU/CPU mode is
-            # visible instead of silently differing between machines.
-            use_gpu = gnina_gpu_available()
-            status_log += f"\n     🖥️ GNINA running in {'GPU' if use_gpu else 'CPU'} mode"
+            # Logged once, not per-ligand, so GPU/CPU mode is visible instead
+            # of silently differing between machines.
+            gpu_present = gnina_gpu_available()
+            if FORCE_CPU:
+                status_log += "\n     🖥️ GNINA forced to CPU mode (--no_gpu) for cross-platform consistency"
+                if gpu_present:
+                    status_log += " — GPU was available but intentionally not used"
+            else:
+                status_log += f"\n     🖥️ GNINA auto mode — {'GPU' if gpu_present else 'CPU'} detected"
 
             for idx, row in filtered_df.iterrows():
                 mol_name = str(row["Name"]).replace(" ", "_")
@@ -336,7 +348,7 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
 
                 gnina_stdout, gnina_stderr, exit_code = run_gnina_docking(
                     target_file.name, ligand_sdf, output_sdf,
-                    final_cx, final_cy, final_cz, size_x, size_y, size_z, use_gpu
+                    final_cx, final_cy, final_cz, size_x, size_y, size_z
                 )
 
                 if exit_code != 0:
