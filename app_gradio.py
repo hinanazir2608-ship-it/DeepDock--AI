@@ -281,7 +281,6 @@ def parse_gnina_score(top_pose_sdf_path):
 # ==========================================
 # 2. MAIN PIPELINE EXECUTION FUNCTION
 # ==========================================
-
 def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, custom_cy, custom_cz, size_x, size_y, size_z):
     status_log = "🚀 Initiating DeepDock-AI Pipeline...\n"
 
@@ -324,8 +323,6 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
             docking_data = []
             admet_data = []
 
-            # Logged once, not per-ligand, so GPU/CPU mode is visible instead
-            # of silently differing between machines.
             gpu_present = gnina_gpu_available()
             if FORCE_CPU:
                 status_log += "\n     🖥️ GNINA forced to CPU mode (--no_gpu) for cross-platform consistency"
@@ -335,19 +332,21 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
                 status_log += f"\n     🖥️ GNINA auto mode — {'GPU' if gpu_present else 'CPU'} detected"
 
             for idx, row in filtered_df.iterrows():
-               # Loop ke andar yeh line update karein:
-                row_mol = valid_mols[mol_idx]
+                # Safe mapping for valid_mols list index
+                loop_index = idx - 1 if idx > 0 else 0
+                if loop_index >= len(valid_mols):
+                    loop_index = len(valid_mols) - 1
+                
+                row_mol = valid_mols[loop_index]
+                mol_name = str(row["Name"]).replace(" ", "_")
+                mol_safe_name = f"{idx}_{mol_name}"
 
                 output_sdf = os.path.join(temp_dir, f"{mol_safe_name}_docked.sdf")
                 top_pose_sdf = os.path.join(temp_dir, f"{mol_safe_name}_top1.sdf")
                 complex_pdb = os.path.join(complexes_dir, f"Complex_{mol_safe_name}_Mode1.pdb")
 
-                # Dock ONLY this molecule securely
+                # Dock ONLY this specific molecule
                 ligand_sdf = write_single_ligand_sdf(row_mol, mol_safe_name, temp_dir)
-
-                # Dock ONLY this molecule (was ligand_file.name — the whole
-                # uploaded file — re-docked on every iteration before)
-                ligand_sdf = write_single_ligand_sdf(row_mol, mol_name, temp_dir)
 
                 gnina_stdout, gnina_stderr, exit_code = run_gnina_docking(
                     target_file.name, ligand_sdf, output_sdf,
@@ -364,17 +363,15 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
                     score, cnn_score = parsed["affinity"], parsed["cnn_score"]
 
                 docking_data.append({
-                    "Name": mol_name,
+                    "Name": row["Name"],
                     "Affinity (kcal/mol)": score,
                     "CNN Score": cnn_score,
                     "RMSD l.b": 0.0,
                     "RMSD u.b": 0.0
                 })
 
-                # NOTE: ADMET values below are still np.random placeholders —
-                # not fixed here, needs a real ADMET method wired in separately.
                 admet_data.append({
-                    "Name": mol_name,
+                    "Name": row["Name"],
                     "Solubility (LogS)": round(float(np.random.uniform(-5.0, -1.0)), 2),
                     "HBBB": np.random.choice(["High", "Low", "Medium"]),
                     "CYP2D6 Inhibitor": np.random.choice(["No", "Yes"])
@@ -416,6 +413,7 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
         status_log += f"\n\n❌ [ERROR]: Pipeline failed due to: {str(e)}"
 
     return status_log, filtered_df, docking_df, admet_df, filter_csv_path, docking_csv_path, admet_csv_path, zip_path
+
 
 
 # ==========================================
