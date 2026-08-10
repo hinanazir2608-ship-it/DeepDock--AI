@@ -21,7 +21,7 @@ GNINA_SEED = 42
 # False = let GNINA auto-use a GPU when it finds one (faster on Kaggle), but then
 #         Kaggle and a GPU-less Ubuntu box are no longer running the identical
 #         code path for CNN scoring.
-FORCE_GPU = True
+FORCE_CPU = FALSE
 
 
 # ==========================================
