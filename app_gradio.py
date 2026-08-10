@@ -86,7 +86,7 @@ def parse_protein_pdbqt(pdbqt_file_path):
 
 def extract_top_ligand_pose(gnina_output_path, top_pose_path):
     """
-    Extracts ONLY Mode 1 (RMSD l.b = 0.0, RMSD u.b = 0.0) from GNINA multi-pose output.
+    Extracts ONLY the very first pose (Mode 1) from GNINA multi-pose SDF/PDB output.
     """
     if not os.path.exists(gnina_output_path):
         return False
@@ -95,9 +95,11 @@ def extract_top_ligand_pose(gnina_output_path, top_pose_path):
 
     with open(gnina_output_path, 'r') as infile, open(top_pose_path, 'w') as outfile:
         if ext == ".sdf":
+            # SDF files mein sirf pehla molecule (pehla $$$$ tak ka hissa) likhna hai
+            line_count = 0
             for line in infile:
                 outfile.write(line)
-                if line.strip() == "$$$$":  # First SDF entry ends here
+                if line.strip() == "$$$$":
                     break
         else:
             in_model = False
