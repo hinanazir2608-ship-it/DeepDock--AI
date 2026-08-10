@@ -336,12 +336,13 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
 
             for idx, row in filtered_df.iterrows():
                # Loop ke andar yeh line update karein:
-                mol_safe_name = f"{idx+1}_{str(row['Name']).replace(' ', '_')}"
+                row_mol = valid_mols[mol_idx]
 
                 output_sdf = os.path.join(temp_dir, f"{mol_safe_name}_docked.sdf")
                 top_pose_sdf = os.path.join(temp_dir, f"{mol_safe_name}_top1.sdf")
                 complex_pdb = os.path.join(complexes_dir, f"Complex_{mol_safe_name}_Mode1.pdb")
 
+                # Dock ONLY this molecule securely
                 ligand_sdf = write_single_ligand_sdf(row_mol, mol_safe_name, temp_dir)
 
                 # Dock ONLY this molecule (was ligand_file.name — the whole
