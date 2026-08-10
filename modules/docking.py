@@ -1,86 +1,176 @@
+"""
+DeepDock-AI — docking.py (fixed)
+
+Changes vs. original:
+  1. Fixed RDKit ETKDG embedding seed -> same starting 3D geometry every run/platform.
+  2. Fixed Vina --seed and --cpu -> reproducible search across machines.
+  3. Reads the score from the --out PDBQT's "REMARK VINA RESULT:" line instead of
+     scraping stdout. This is far more stable across Vina 1.1.x / 1.2.x CLI versions
+     than parsing the printed results table.
+  4. Removed the silent fake-score fallback. Failures are now reported honestly
+     (Status = "Failed: <reason>", Affinity = None) instead of a linear fake number
+     labeled "Docked Successfully".
+  5. Validates grid_center isn't left at the (0,0,0) default before docking.
+  6. Checks the Vina binary version once up front and logs it, so you can diff
+     Kaggle vs. Ubuntu builds directly instead of guessing.
+"""
+
 import os
+import shutil
 import subprocess
-import pandas as pd
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
+RDKIT_EMBED_SEED = 42
+VINA_SEED = 42
+VINA_CPU = 4  # pin the SAME value on every platform you compare
+
+
+def get_vina_version():
+    """Returns the Vina binary's reported version string, or None if not found."""
+    vina_path = shutil.which("vina")
+    if not vina_path:
+        return None
+    try:
+        result = subprocess.run(["vina", "--version"], capture_output=True, text=True, timeout=10)
+        return (result.stdout or result.stderr).strip()
+    except Exception:
+        return None
+
+
 def mol_to_pdbqt(mol, output_pdbqt_path):
     """
-    Converts an RDKit Mol object into a PDBQT file for Vina docking
+    Converts an RDKit Mol object into a PDBQT file for Vina docking.
+    Returns (success: bool, error_message: str | None).
     """
     try:
-        # Add Hydrogens if missing
         mol = Chem.AddHs(mol)
-        AllChem.EmbedMolecule(mol, AllChem.ETKDG())
-        
+
+        # Fixed seed -> same starting 3D conformer on every machine/run.
+        params = AllChem.ETKDGv3()
+        params.randomSeed = RDKIT_EMBED_SEED
+        embed_result = AllChem.EmbedMolecule(mol, params)
+        if embed_result == -1:
+            return False, "RDKit embedding failed (EmbedMolecule returned -1)"
+
         pdb_path = output_pdbqt_path.replace(".pdbqt", ".pdb")
         Chem.MolToPDBFile(mol, pdb_path)
-        
-        # Simple convert to PDBQT (using openbabel or fallback format)
-        os.system(f"obabel -ipdb {pdb_path} -opdbqt -O {output_pdbqt_path} --partialcharge eem 2>/dev/null")
-        return True
-    except Exception as e:
-        print(f"Error converting molecule to PDBQT: {e}")
-        return False
 
-def run_batched_docking(filtered_mols, target_pdbqt_file, grid_center=(0,0,0), grid_size=(20,20,20), output_dir="/kaggle/working/output", progress=None):
+        obabel_cmd = [
+            "obabel", "-ipdb", pdb_path, "-opdbqt", "-O", output_pdbqt_path,
+            "--partialcharge", "eem",
+        ]
+        result = subprocess.run(obabel_cmd, capture_output=True, text=True)
+
+        if not os.path.exists(output_pdbqt_path):
+            return False, f"obabel did not produce output. stderr: {result.stderr.strip()[:300]}"
+
+        return True, None
+    except Exception as e:
+        return False, f"Error converting molecule to PDBQT: {e}"
+
+
+def parse_affinity_from_pdbqt(out_pdbqt_path):
     """
-    Executes actual AutoDock Vina docking with live progress tracking
+    Reads the top-mode binding affinity from Vina's output PDBQT file, e.g.:
+        REMARK VINA RESULT:    -7.6      0.000      0.000
+    This line format has been far more stable across Vina 1.1.x/1.2.x than the
+    printed stdout table, since it's part of Vina's file-output contract.
+    """
+    if not os.path.exists(out_pdbqt_path):
+        return None
+    with open(out_pdbqt_path, "r") as f:
+        for line in f:
+            if line.startswith("REMARK VINA RESULT:"):
+                parts = line.split()
+                # ["REMARK", "VINA", "RESULT:", "-7.6", "0.000", "0.000"]
+                try:
+                    return float(parts[3])
+                except (IndexError, ValueError):
+                    return None
+    return None
+
+
+def run_batched_docking(
+    filtered_mols,
+    target_pdbqt_file,
+    grid_center=(0, 0, 0),
+    grid_size=(20, 20, 20),
+    output_dir="/kaggle/working/output",
+    progress=None,
+):
+    """
+    Executes AutoDock Vina docking with live progress tracking and honest
+    failure reporting (no fabricated scores).
     """
     os.makedirs(output_dir, exist_ok=True)
     total = len(filtered_mols)
     results = []
 
-    target_path = target_pdbqt_file.name if hasattr(target_pdbqt_file, 'name') else str(target_pdbqt_file)
+    target_path = target_pdbqt_file.name if hasattr(target_pdbqt_file, "name") else str(target_pdbqt_file)
+
+    vina_version = get_vina_version()
+    if vina_version is None:
+        print("⚠️  'vina' binary not found on PATH. All molecules will fail — "
+              "install it before docking, don't rely on a fallback score.")
+    else:
+        print(f"ℹ️  Using Vina: {vina_version}")
+
+    if grid_center == (0, 0, 0):
+        print("⚠️  grid_center is still the default (0,0,0). This is almost never "
+              "your real binding site — pass the actual pocket coordinates.")
 
     for idx, mol in enumerate(filtered_mols):
-        # Fix Indentation & Safe Name Extraction
         mol_name = mol.GetProp("_Name") if mol.HasProp("_Name") else f"Ligand_{idx+1}"
-        
-        # Progress Bar Update (Scaling 0.2 to 0.8)
+
         if progress is not None:
             current_progress = 0.2 + (0.6 * (idx + 1) / total)
             progress(current_progress, desc=f"⚡ Docking [{idx+1}/{total}]: {mol_name}")
 
         ligand_pdbqt = os.path.join(output_dir, f"{mol_name}.pdbqt")
         out_pdbqt = os.path.join(output_dir, f"{mol_name}_out.pdbqt")
-        
-        # 1. Convert Mol to PDBQT
-        converted = mol_to_pdbqt(mol, ligand_pdbqt)
-        
-        # 2. Run Vina Command (If Vina is installed)
-        affinity = None
-        if os.path.exists(ligand_pdbqt) and os.path.exists(target_path):
-            vina_cmd = (
-                f"vina --receptor {target_path} --ligand {ligand_pdbqt} "
-                f"--center_x {grid_center[0]} --center_y {grid_center[1]} --center_z {grid_center[2]} "
-                f"--size_x {grid_size[0]} --size_y {grid_size[1]} --size_z {grid_size[2]} "
-                f"--out {out_pdbqt} --exhaustiveness 8"
-            )
-            
-            # Execute command silently
-            process = subprocess.run(vina_cmd, shell=True, capture_output=True, text=True)
-            
-            # Parse binding affinity score from output log
-            for line in process.stdout.split('\n'):
-                if line.strip().startswith('1'):
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        try:
-                            affinity = float(parts[1])
-                        except ValueError:
-                            pass
-                    break
 
-        # Fallback if Vina is not installed or output failed (for workflow stability)
-        if affinity is None:
-            affinity = round(-6.5 - (idx * 0.15), 2)
+        affinity = None
+        status = None
+
+        converted, convert_err = mol_to_pdbqt(mol, ligand_pdbqt)
+
+        if not converted:
+            status = f"Failed: {convert_err}"
+        elif not os.path.exists(target_path):
+            status = f"Failed: receptor PDBQT not found at {target_path}"
+        elif vina_version is None:
+            status = "Failed: vina binary not found on PATH"
+        else:
+            vina_cmd = [
+                "vina",
+                "--receptor", target_path,
+                "--ligand", ligand_pdbqt,
+                "--center_x", str(grid_center[0]),
+                "--center_y", str(grid_center[1]),
+                "--center_z", str(grid_center[2]),
+                "--size_x", str(grid_size[0]),
+                "--size_y", str(grid_size[1]),
+                "--size_z", str(grid_size[2]),
+                "--out", out_pdbqt,
+                "--exhaustiveness", "8",
+                "--seed", str(VINA_SEED),
+                "--cpu", str(VINA_CPU),
+            ]
+            process = subprocess.run(vina_cmd, capture_output=True, text=True)
+
+            if process.returncode != 0:
+                status = f"Failed: vina exited {process.returncode}: {process.stderr.strip()[:300]}"
+            else:
+                affinity = parse_affinity_from_pdbqt(out_pdbqt)
+                status = "Docked Successfully" if affinity is not None else \
+                    "Failed: vina ran but no REMARK VINA RESULT line found in output"
 
         results.append({
             "CID": idx + 1,
             "Molecule Name": mol_name,
             "Affinity (kcal/mol)": affinity,
-            "Status": "Docked Successfully"
+            "Status": status,
         })
 
     return results
