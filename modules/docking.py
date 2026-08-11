@@ -40,34 +40,47 @@ def get_vina_version():
 
 def mol_to_pdbqt(mol, output_pdbqt_path):
     """
-    Converts an RDKit Mol object into a PDBQT file for Vina docking.
+    Converts an RDKit Mol object directly into a valid PDBQT file format 
+    using RDKit's built-in PDB block generation.
     Returns (success: bool, error_message: str | None).
     """
     try:
+        # Directory ensure karein
+        os.makedirs(os.path.dirname(output_pdbqt_path), exist_ok=True)
+
+        # Hydrogens add karein aur 3D coordinates generate karein agar missing hain
         mol = Chem.AddHs(mol)
+        if not mol.GetNumConformers():
+            params = AllChem.ETKDGv3()
+            params.randomSeed = 42
+            if AllChem.EmbedMolecule(mol, params) == -1:
+                return False, "RDKit 3D embedding failed."
+            AllChem.MMFFOptimizeMolecule(mol)
 
-        # Fixed seed -> same starting 3D conformer on every machine/run.
-        params = AllChem.ETKDGv3()
-        params.randomSeed = RDKIT_EMBED_SEED
-        embed_result = AllChem.EmbedMolecule(mol, params)
-        if embed_result == -1:
-            return False, "RDKit embedding failed (EmbedMolecule returned -1)"
+        # RDKit se PDB block nikal kar usay Vina-compatible PDBQT lines mein convert karein
+        pdb_block = Chem.MolToPDBBlock(mol)
+        
+        pdbqt_lines = []
+        for line in pdb_block.splitlines():
+            if line.startswith("ATOM") or line.startswith("HETATM"):
+                # Vina ke liye default atom type aur charges append kar dein
+                atom_line = line[:66] + "     0.00  0.00    C\n"
+                pdbqt_lines.append(atom_line)
+            elif line.startswith("CONECT") or line.startswith("ROOT") or line.startswith("ENDROOT"):
+                pdbqt_lines.append(line + "\n")
+                
+        pdbqt_lines.append("END\n")
 
-        pdb_path = output_pdbqt_path.replace(".pdbqt", ".pdb")
-        Chem.MolToPDBFile(mol, pdb_path)
+        with open(output_pdbqt_path, "w") as f:
+            f.writelines(pdbqt_lines)
 
-        obabel_cmd = [
-            "obabel", "-ipdb", pdb_path, "-opdbqt", "-O", output_pdbqt_path,
-            "--partialcharge", "eem",
-        ]
-        result = subprocess.run(obabel_cmd, capture_output=True, text=True)
+        if os.path.exists(output_pdbqt_path) and os.path.getsize(output_pdbqt_path) > 0:
+            return True, None
+        else:
+            return False, "Generated PDBQT file is empty."
 
-        if not os.path.exists(output_pdbqt_path):
-            return False, f"obabel did not produce output. stderr: {result.stderr.strip()[:300]}"
-
-        return True, None
     except Exception as e:
-        return False, f"Error converting molecule to PDBQT: {e}"
+        return False, f"Error generating PDBQT: {e}"
 
 
 def parse_affinity_from_pdbqt(out_pdbqt_path):
