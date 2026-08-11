@@ -40,15 +40,11 @@ def get_vina_version():
 
 def mol_to_pdbqt(mol, output_pdbqt_path):
     """
-    Converts an RDKit Mol object directly into a valid PDBQT file format 
-    using RDKit's built-in PDB block generation.
-    Returns (success: bool, error_message: str | None).
+    Converts an RDKit Mol object directly into a clean, Vina-compatible PDBQT file format.
     """
     try:
-        # Directory ensure karein
         os.makedirs(os.path.dirname(output_pdbqt_path), exist_ok=True)
 
-        # Hydrogens add karein aur 3D coordinates generate karein agar missing hain
         mol = Chem.AddHs(mol)
         if not mol.GetNumConformers():
             params = AllChem.ETKDGv3()
@@ -57,27 +53,29 @@ def mol_to_pdbqt(mol, output_pdbqt_path):
                 return False, "RDKit 3D embedding failed."
             AllChem.MMFFOptimizeMolecule(mol)
 
-        # RDKit se PDB block nikal kar usay Vina-compatible PDBQT lines mein convert karein
         pdb_block = Chem.MolToPDBBlock(mol)
         
+        # Clean PDB block lines for Vina/Smina format compatibility
         pdbqt_lines = []
+        atom_serial = 1
         for line in pdb_block.splitlines():
             if line.startswith("ATOM") or line.startswith("HETATM"):
-                # Vina ke liye default atom type aur charges append kar dein
-                atom_line = line[:66] + "     0.00  0.00    C\n"
-                pdbqt_lines.append(atom_line)
-            elif line.startswith("CONECT") or line.startswith("ROOT") or line.startswith("ENDROOT"):
-                pdbqt_lines.append(line + "\n")
+                # Standard PDB line ko proper Vina PDBQT line mein dhalna
+                atom_name = line[12:16].strip()
+                element = atom_name[0] # Simple element mapping
                 
-        pdbqt_lines.append("END\n")
+                # Format: ATOM serial atom_name res_name chain res_seq x y z occupancy temp_factor charge element
+                new_line = f"ATOM  {atom_serial:5d}  {atom_name:<4s} UNL     1    {line[30:54]}  1.00  0.00    +0.000 {element}\n"
+                pdbqt_lines.append(new_line)
+                atom_serial += 1
+
+        if not pdbqt_lines:
+            return False, "No valid atoms found to convert."
 
         with open(output_pdbqt_path, "w") as f:
             f.writelines(pdbqt_lines)
 
-        if os.path.exists(output_pdbqt_path) and os.path.getsize(output_pdbqt_path) > 0:
-            return True, None
-        else:
-            return False, "Generated PDBQT file is empty."
+        return True, None
 
     except Exception as e:
         return False, f"Error generating PDBQT: {e}"
