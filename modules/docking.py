@@ -156,7 +156,7 @@ def run_batched_docking(
             status = "Failed: vina binary not found on PATH"
         else:
             vina_cmd = [
-                "vina",
+                "/usr/local/bin/vina",
                 "--receptor", target_path,
                 "--ligand", ligand_pdbqt,
                 "--center_x", str(grid_center[0]),
