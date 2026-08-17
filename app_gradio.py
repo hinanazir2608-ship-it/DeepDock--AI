@@ -6,7 +6,7 @@ import subprocess
 import numpy as np
 import pandas as pd
 import gradio as gr
-
+from Bio import PDB
 # RDKit Logging & Import Fixes
 from rdkit import RDLogger
 RDLogger.DisableLog('rdApp.*')
@@ -49,91 +49,51 @@ def clean_dataframe_indices(df, pubchem_col_name="PubChem CID"):
 
     return df
 
+def clean_and_prepare_receptor(input_pdb_path, output_clean_pdb_path):
+    """
+    Cleans the target protein PDB by removing water molecules, heteroatoms, 
+    and alternate conformations, then saves a clean PDB file.
+    """
+    parser = PDB.PDBParser(QUIET=True)
+    structure = parser.get_receptor("receptor", input_pdb_path) if hasattr(parser, "get_receptor") else parser.get_structure("receptor", input_pdb_path)
+    
+    class SelectiveDeleter(PDB.Select):
+        def accept_residue(self, residue):
+            # Exclude water molecules and standard heteroatoms if desired
+            if residue.id[0].startswith("W"):
+                return False
+            return True
 
-def clean_and_prepare_receptor(target_file_path, output_pdb_path, output_pdbqt_path):
-    """
-    Cleans target PDB file, removes water and heteroatoms, 
-    and outputs strictly formatted PDBQT compatible with GNINA/AutoDock.
-    """
+    io = PDB.PDBIO()
+    io.set_structure(structure)
+    io.save(output_clean_pdb_path, SelectiveDeleter())
+    
+    # Generate PDBQT using Open Babel or MGLTools (AutoDockTools) if available
+    output_pdbqt_path = output_clean_pdb_path.replace(".pdb", ".pdbqt")
+    
+    # Example using Open Babel CLI subprocess call
     try:
-        with open(target_file_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
+        subprocess.run(
+            ["obabel", output_clean_pdb_path, "-O", output_pdbqt_path, "-xr"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        print(f"Successfully prepared receptor PDBQT at: {output_pdbqt_path}")
+    except (subprocess.SubprocessError, FileNotFoundError):
+        print("Warning: Open Babel (obabel) not found in PATH. Ensure PDBQT is generated manually.")
 
-        cleaned_pdb_lines = []
-        pdbqt_lines = []
-        current_chain = None
+    return output_pdbqt_path
 
-        for line in lines:
-            # Skip water molecules
-            if any(wat in line for wat in ["HOH", "WAT"]):
-                continue
-            
-            # Skip heteroatoms if you want pure protein residues
-            if line.startswith("HETATM"):
-                continue
-
-            if line.startswith("ATOM"):
-                chain_id = line[21] if len(line) > 21 else 'A'
-                if current_chain is not None and chain_id != current_chain:
-                    cleaned_pdb_lines.append("TER\n")
-                    pdbqt_lines.append("TER\n")
-                current_chain = chain_id
-
-                # 1. Standard PDB line for visualization
-                std_line = line[:66].ljust(66) + "\n"
-                cleaned_pdb_lines.append(std_line)
-
-                # 2. Extract element symbol to map to valid AutoDock atom types
-                element = ""
-                if len(line) >= 78:
-                    element = line[76:78].strip().upper()
-                
-                if not element or not element.isalpha():
-                    atom_name = line[12:16].strip()
-                    element = ''.join([c for c in atom_name if c.isalpha()]).upper()[:1]
-
-                # Map to standard AutoDock atom types
-                if element == 'C':
-                    ad_type = 'A'
-                elif element == 'N':
-                    ad_type = 'N'
-                elif element == 'O':
-                    ad_type = 'OA'
-                elif element == 'S':
-                    ad_type = 'SA'
-                elif element == 'P':
-                    ad_type = 'P'
-                elif element == 'H':
-                    atom_name = line[12:16].strip()
-                    ad_type = 'HD' if atom_name.startswith('H') else 'H'
-                else:
-                    ad_type = element if len(element) == 1 else 'A'
-
-                # 3. Strictly formatted PDBQT line (Columns 0-54: standard coords/prefix, 
-                # followed by exact AutoDock spacing for charge and atom type)
-                prefix = line[:54]  # ATOM serial, name, resName, chain, resSeq, X, Y, Z
-                
-                # Standard AutoDock PDBQT format: 
-                # [Prefix up to coords] + [Charge (6 spaces, e.g., "  0.00")] + [Spacing] + [Atom Type]
-                pdbqt_line = f"{prefix}  0.0000 {ad_type:>2}\n"
-                pdbqt_lines.append(pdbqt_line)
-
-            elif line.startswith(("TER", "HEADER", "REMARK", "MODEL", "ENDMDL")):
-                cleaned_pdb_lines.append(line if line.endswith("\n") else line + "\n")
-                pdbqt_lines.append(line if line.endswith("\n") else line + "\n")
-
-        with open(output_pdb_path, "w", encoding="utf-8") as f:
-            f.writelines(cleaned_pdb_lines)
-
-        with open(output_pdbqt_path, "w", encoding="utf-8") as f:
-            f.writelines(pdbqt_lines)
-
-        return True
-    except Exception as e:
-        print(f"[ERROR] Receptor cleaning failed: {e}")
-        return False
-
-
+# Example Usage within the pipeline
+if __name__ == "__main__":
+    raw_pdb = "target.pdb"
+    clean_pdb = "target_clean.pdb"
+    
+    if os.path.exists(raw_pdb):
+        clean_and_prepare_receptor(raw_pdb, clean_pdb)
+    else:
+        print(f"Input file {raw_pdb} not found. Please provide a valid receptor PDB.")
 def parse_protein_pdbqt(pdbqt_file_path):
     """
     Parses PDBQT target protein to calculate the binding-site centroid coordinates.
