@@ -167,30 +167,38 @@ def convert_ligand_pose_to_pdb(sdf_path, pdb_path):
         return False
 
 
-def create_protein_ligand_complex(receptor_path, ligand_sdf_path, output_complex_path):
+def create_protein_ligand_complex(receptor_pdb_path: str, ligand_pdb_path: str, output_complex_path: str) -> str:
     """
-    Merges the clean receptor PDB and ligand PDB into a single PDB complex 
-    for flawless visualization in Discovery Studio.
+    Merges a clean receptor PDB and a docked ligand PDB into a single complex PDB file
+    suitable for flawless visualization in Discovery Studio or PyMOL.
     """
     receptor_lines = []
-    with open(receptor_path, 'r', encoding="utf-8", errors="ignore") as f:
+    # 1. Read clean receptor atom lines
+    with open(receptor_pdb_path, 'r', encoding="utf-8", errors="ignore") as f:
         for line in f:
-            if line.startswith("ATOM") or line.startswith("HETATM"):
-                clean_line = line[:66] + "\n"
-                receptor_lines.append(clean_line)
-            elif line.startswith("REMARK") or line.startswith("TER"):
-                receptor_lines.append(line)
+            if line.startswith(("ATOM", "HETATM")):
+                # Ensure standard 66-char formatting
+                receptor_lines.append(line[:66].ljust(66) + "\n")
+            elif line.startswith(("TER", "REMARK")):
+                receptor_lines.append(line if line.endswith("\n") else line + "\n")
 
-    suppl = Chem.SDMolSupplier(ligand_sdf_path)
-    mol = next(suppl, None)
-    ligand_pdb_block = Chem.MolToPDBBlock(mol) if mol is not None else ""
+    # 2. Read ligand atom lines
+    ligand_lines = []
+    if os.path.exists(ligand_pdb_path):
+        with open(ligand_pdb_path, 'r', encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if line.startswith(("ATOM", "HETATM")):
+                    # Optional: Change HETATM to ATOM or keep as HETATM for ligand
+                    ligand_lines.append(line[:66].ljust(66) + "\n")
 
+    # 3. Write combined complex
     with open(output_complex_path, 'w', encoding="utf-8") as out_f:
         out_f.writelines(receptor_lines)
         out_f.write("TER\n")
-        out_f.write(ligand_pdb_block)
+        out_f.writelines(ligand_lines)
         out_f.write("END\n")
 
+    return output_complex_path
 
 def process_ligands(ligand_file_path, filter_type):
     """
