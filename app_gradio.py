@@ -13,7 +13,7 @@ RDLogger.DisableLog('rdApp.*')
 
 from rdkit import Chem
 from rdkit.Chem import Descriptors, Lipinski
-
+from modules.export import pdbqt_to_pdb_standard
 GNINA_SEED = 42
 FORCE_CPU = False
 
@@ -125,18 +125,15 @@ def convert_ligand_pose_to_pdb(sdf_path, pdb_path):
 
 
 def create_protein_ligand_complex(receptor_pdbqt, top_ligand_pdb, output_complex_pdb):
-    """
-    Merges protein receptor and top ligand pose (PDB) while explicitly
-    removing any residual water molecules (HOH, WAT, SOL, TIP3).
-    NOTE: top_ligand_pdb must be a real PDB file (ATOM/HETATM lines) —
-    pass it through convert_ligand_pose_to_pdb() first if you have an SDF.
-    """
     water_res_names = {"HOH", "WAT", "SOL", "TIP3"}
+
+    clean_receptor_pdb = receptor_pdbqt.replace(".pdbqt", "_clean.pdb")
+    pdbqt_to_pdb_standard(receptor_pdbqt, clean_receptor_pdb)
 
     try:
         with open(output_complex_pdb, 'w') as complex_file:
-            if os.path.exists(receptor_pdbqt):
-                with open(receptor_pdbqt, 'r') as f_rec:
+            if os.path.exists(clean_receptor_pdb):
+                with open(clean_receptor_pdb, 'r') as f_rec:
                     for line in f_rec:
                         if line.startswith(("ATOM", "HETATM")):
                             res_name = line[17:20].strip()
@@ -255,6 +252,20 @@ def run_gnina_docking(receptor_path, ligand_path, output_path,
     except FileNotFoundError:
         return "", "GNINA binary not found in system PATH.", 1
 
+def _safe_float(val):
+    if val is None:
+        return None
+    s = str(val).strip()
+    try:
+        return float(s)
+    except ValueError:
+        parts = [p for p in s.replace(",", " ").split() if p]
+        try:
+            vals = [float(p) for p in parts]
+            return sum(vals) / len(vals) if vals else None
+        except ValueError:
+            return None
+
 
 def parse_gnina_score(top_pose_sdf_path):
     """
@@ -274,6 +285,10 @@ def parse_gnina_score(top_pose_sdf_path):
 
     if mol is not None:
         props = mol.GetPropsAsDict()
+        print(f"[DEBUG] props for {top_pose_sdf_path}: {props}")
+        affinity = _safe_float(props.get("minimizedAffinity"))
+        cnn_score = _safe_float(props.get("CNNscore"))
+        cnn_affinity = _safe_float(props.get("CNNaffinity"))
         if "minimizedAffinity" in props:
             affinity = round(float(props["minimizedAffinity"]), 2)
         if "CNNscore" in props:
