@@ -6,7 +6,6 @@ import subprocess
 import numpy as np
 import pandas as pd
 import gradio as gr
-from Bio import PDB
 # RDKit Logging & Import Fixes
 from rdkit import RDLogger
 RDLogger.DisableLog('rdApp.*')
