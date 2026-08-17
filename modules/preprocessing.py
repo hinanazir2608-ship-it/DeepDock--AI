@@ -45,7 +45,53 @@ def _extract_cid(mol: Chem.Mol, idx: int, name: str) -> str:
         return name
     return f"CID_{idx}"
 
+def clean_and_prepare_receptor(pdb_bytes: bytes, output_pdb_path: str, output_pdbqt_path: str) -> bool:
+    """
+    Cleans target PDB bytes to ensure standard atom records and TER cards are preserved 
+    so Discovery Studio does not render fragmented protein structures. 
+    Also prepares standard PDB and PDBQT files for GNINA/Vina.
+    """
+    try:
+        text = pdb_bytes.decode("utf-8", errors="ignore")
+        lines = text.splitlines()
 
+        cleaned_pdb_lines = []
+        pdbqt_lines = []
+
+        current_chain = None
+        for line in lines:
+            if line.startswith(("ATOM", "HETATM")):
+                # Ensure correct columns and chain tracking
+                chain_id = line[21] if len(line) > 21 else 'A'
+                if current_chain is not None and chain_id != current_chain:
+                    cleaned_pdb_lines.append("TER\n")
+                    pdbqt_lines.append("TER\n")
+                current_chain = chain_id
+
+                # Standard PDB line (1-66 chars)
+                std_line = line[:66].ljust(66) + "\n"
+                cleaned_pdb_lines.append(std_line)
+
+                # PDBQT line (adds dummy charges/types if missing)
+                if len(line) >= 70:
+                    pdbqt_lines.append(line)
+                else:
+                    pdbqt_lines.append(line.strip() + "  0.00 \n")
+
+            elif line.startswith(("TER", "HEADER", "REMARK", "MODEL", "ENDMDL")):
+                cleaned_pdb_lines.append(line + "\n" if not line.endswith("\n") else line)
+                pdbqt_lines.append(line + "\n" if not line.endswith("\n") else line)
+
+        with open(output_pdb_path, "w") as f:
+            f.writelines(cleaned_pdb_lines)
+
+        with open(output_pdbqt_path, "w") as f:
+            f.writelines(pdbqt_lines)
+
+        return True
+    except Exception as e:
+        print(f"[ERROR] Receptor cleaning failed: {e}")
+        return False
 # ── Ligand SDF loading (FIXED Return Type) ───────────────────────────────────
 def load_ligands_from_bytes(
     sdf_bytes: bytes,
