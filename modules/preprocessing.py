@@ -47,11 +47,8 @@ def _extract_cid(mol: Chem.Mol, idx: int, name: str) -> str:
 
 def clean_and_prepare_receptor(target_file_path, output_pdb_path, output_pdbqt_path):
     """
-    Cleans target PDB/PDBQT file:
-    - Removes all water molecules (HOH, WAT).
-    - Removes all heteroatoms (HETATM) except standard protein backbone/sidechains.
-    - Fixes atom types for AutoDock compatibility (eliminating N1+, charges errors).
-    - Generates clean PDB (for visualization) and clean PDBQT (for GNINA docking).
+    Cleans target PDB file, removes water and heteroatoms, 
+    and outputs strictly formatted PDBQT compatible with GNINA/AutoDock.
     """
     try:
         with open(target_file_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -62,12 +59,11 @@ def clean_and_prepare_receptor(target_file_path, output_pdb_path, output_pdbqt_p
         current_chain = None
 
         for line in lines:
-            # 1. Skip water molecules and unwanted HETATM (heteroatoms, ions, ligands, cofactors)
+            # Skip water molecules
             if any(wat in line for wat in ["HOH", "WAT"]):
                 continue
             
-            # Agar aap sirf standard ATOM records rakhna chahte hain aur HETATM (heteroatoms) 
-            # ko remove karna chahte hain, toh line.startswith("HETATM") ko yahan skip kar dein:
+            # Skip heteroatoms if you want pure protein residues
             if line.startswith("HETATM"):
                 continue
 
@@ -78,11 +74,11 @@ def clean_and_prepare_receptor(target_file_path, output_pdb_path, output_pdbqt_p
                     pdbqt_lines.append("TER\n")
                 current_chain = chain_id
 
-                # Standard PDB line for visualization
+                # 1. Standard PDB line for visualization
                 std_line = line[:66].ljust(66) + "\n"
                 cleaned_pdb_lines.append(std_line)
 
-                # Extract element symbol to map to valid AutoDock atom types
+                # 2. Extract element symbol to map to valid AutoDock atom types
                 element = ""
                 if len(line) >= 78:
                     element = line[76:78].strip().upper()
@@ -91,7 +87,7 @@ def clean_and_prepare_receptor(target_file_path, output_pdb_path, output_pdbqt_p
                     atom_name = line[12:16].strip()
                     element = ''.join([c for c in atom_name if c.isalpha()]).upper()[:1]
 
-                # Map to standard AutoDock atom types (including HD for polar hydrogens)
+                # Map to standard AutoDock atom types
                 if element == 'C':
                     ad_type = 'A'
                 elif element == 'N':
@@ -103,16 +99,19 @@ def clean_and_prepare_receptor(target_file_path, output_pdb_path, output_pdbqt_p
                 elif element == 'P':
                     ad_type = 'P'
                 elif element == 'H':
-                    # Polar hydrogens are assigned 'HD' in AutoDock, others 'H'
                     atom_name = line[12:16].strip()
                     ad_type = 'HD' if atom_name.startswith('H') else 'H'
                 else:
                     ad_type = element if len(element) == 1 else 'A'
 
-                # Construct clean PDBQT line with valid atom type and neutral charge
-                clean_prefix = line[:70].ljust(70)
-                strict_pdbqt_line = f"{clean_prefix} {ad_type:<2}  0.00\n"
-                pdbqt_lines.append(strict_pdbqt_line)
+                # 3. Strictly formatted PDBQT line (Columns 0-54: standard coords/prefix, 
+                # followed by exact AutoDock spacing for charge and atom type)
+                prefix = line[:54]  # ATOM serial, name, resName, chain, resSeq, X, Y, Z
+                
+                # Standard AutoDock PDBQT format: 
+                # [Prefix up to coords] + [Charge (6 spaces, e.g., "  0.00")] + [Spacing] + [Atom Type]
+                pdbqt_line = f"{prefix}  0.0000 {ad_type:>2}\n"
+                pdbqt_lines.append(pdbqt_line)
 
             elif line.startswith(("TER", "HEADER", "REMARK", "MODEL", "ENDMDL")):
                 cleaned_pdb_lines.append(line if line.endswith("\n") else line + "\n")
