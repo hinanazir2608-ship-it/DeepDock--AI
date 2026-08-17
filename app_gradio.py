@@ -6,6 +6,7 @@ import subprocess
 import numpy as np
 import pandas as pd
 import gradio as gr
+
 # RDKit Logging & Import Fixes
 from rdkit import RDLogger
 RDLogger.DisableLog('rdApp.*')
@@ -21,6 +22,106 @@ FORCE_CPU = False
 # ==========================================
 # 1. HELPER & PREPROCESSING FUNCTIONS
 # ==========================================
+
+def clean_and_prepare_receptor(target_file_path, output_pdb_path, output_pdbqt_path):
+    """
+    Strictly formats PDB and PDBQT according to official AutoDock fixed-width specifications:
+    - Removes water and heteroatoms.
+    - Maps atoms to correct AutoDock types.
+    - Handles 3 arguments cleanly without missing dependencies.
+    """
+    try:
+        with open(target_file_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+
+        cleaned_pdb_lines = []
+        pdbqt_lines = []
+        current_chain = None
+
+        for line in lines:
+            # Skip water molecules
+            if any(wat in line for wat in ["HOH", "WAT"]):
+                continue
+            
+            # Skip heteroatoms
+            if line.startswith("HETATM"):
+                continue
+
+            if line.startswith("ATOM"):
+                if len(line) < 54:
+                    continue
+
+                chain_id = line[21] if len(line) > 21 else 'A'
+                if current_chain is not None and chain_id != current_chain:
+                    cleaned_pdb_lines.append("TER\n")
+                    pdbqt_lines.append("TER\n")
+                current_chain = chain_id
+
+                # 1. Standard PDB line for visualization
+                std_line = line[:66].ljust(66) + "\n"
+                cleaned_pdb_lines.append(std_line)
+
+                # 2. Extract coordinates safely from standard positions
+                try:
+                    x_str = line[30:38].strip()
+                    y_str = line[38:46].strip()
+                    z_str = line[46:54].strip()
+                    x = float(x_str)
+                    y = float(y_str)
+                    z = float(z_str)
+                except ValueError:
+                    continue
+
+                # 3. Extract atom name & map to valid AutoDock atom type
+                atom_name = line[12:16].strip()
+                element = ''.join([c for c in atom_name if c.isalpha()]).upper()[:1]
+
+                if element == 'C':
+                    ad_type = 'A'
+                elif element == 'N':
+                    ad_type = 'N'
+                elif element == 'O':
+                    ad_type = 'OA'
+                elif element == 'S':
+                    ad_type = 'SA'
+                elif element == 'P':
+                    ad_type = 'P'
+                elif element == 'H':
+                    ad_type = 'HD' if atom_name.startswith('H') else 'H'
+                else:
+                    ad_type = element if len(element) == 1 else 'A'
+
+                charge_str = " 0.0000"
+
+                # 4. Construct strictly aligned PDBQT line using official fixed widths
+                atom_num = line[6:11].strip().rjust(5)
+                at_name = line[12:16].ljust(4)
+                alt_loc = line[16:17]
+                res_name = line[17:20].ljust(3)
+                ch_id = line[21:22].ljust(1)
+                res_seq = line[22:26].strip().rjust(4)
+
+                pdbqt_line = (
+                    f"ATOM  {atom_num} {at_name}{alt_loc}{res_name} {ch_id}{res_seq}    "
+                    f"{x:8.3f}{y:8.3f}{z:8.3f}{charge_str} {ad_type:>2}\n"
+                )
+                pdbqt_lines.append(pdbqt_line)
+
+            elif line.startswith(("TER", "HEADER", "REMARK", "MODEL", "ENDMDL")):
+                cleaned_pdb_lines.append(line if line.endswith("\n") else line + "\n")
+                pdbqt_lines.append(line if line.endswith("\n") else line + "\n")
+
+        with open(output_pdb_path, "w", encoding="utf-8") as f:
+            f.writelines(cleaned_pdb_lines)
+
+        with open(output_pdbqt_path, "w", encoding="utf-8") as f:
+            f.writelines(pdbqt_lines)
+
+        return True
+    except Exception as e:
+        print(f"[ERROR] Receptor cleaning failed: {e}")
+        return False
+
 
 def clean_dataframe_indices(df, pubchem_col_name="PubChem CID"):
     """
@@ -48,53 +149,7 @@ def clean_dataframe_indices(df, pubchem_col_name="PubChem CID"):
 
     return df
 
-def clean_and_prepare_receptor(input_pdb_path, output_clean_pdb_path, *args):
-    """
-    Cleans the target protein PDB by removing water molecules, heteroatoms, 
-    and alternate conformations, then saves a clean PDB file.
-    Accepts additional arguments (*args) to prevent argument count mismatches.
-    """
-    parser = PDB.PDBParser(QUIET=True)
-    structure = parser.get_structure("receptor", input_pdb_path)
-    
-    class SelectiveDeleter(PDB.Select):
-        def accept_residue(self, residue):
-            # Exclude water molecules
-            if residue.id[0].startswith("W"):
-                return False
-            return True
 
-    io = PDB.PDBIO()
-    io.set_structure(structure)
-    io.save(output_clean_pdb_path, SelectiveDeleter())
-    
-    # Generate PDBQT using Open Babel if available
-    output_pdbqt_path = output_clean_pdb_path.replace(".pdb", ".pdbqt")
-    
-    try:
-        subprocess.run(
-            ["obabel", output_clean_pdb_path, "-O", output_pdbqt_path, "-xr"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        print(f"Successfully prepared receptor PDBQT at: {output_pdbqt_path}")
-    except (subprocess.SubprocessError, FileNotFoundError):
-        print("Warning: Open Babel (obabel) not found in PATH. Ensure PDBQT is generated manually.")
-
-    return output_pdbqt_path
-
-# Example Usage within the pipeline
-if __name__ == "__main__":
-    raw_pdb = "target.pdb"
-    clean_pdb = "target_clean.pdb"
-    
-    if os.path.exists(raw_pdb):
-        # Now safely handles 2 or more arguments if your pipeline passes extra context
-        clean_and_prepare_receptor(raw_pdb, clean_pdb)
-    else:
-        print(f"Input file {raw_pdb} not found. Please provide a valid receptor PDB.")
-        
 def parse_protein_pdbqt(pdbqt_file_path):
     """
     Parses PDBQT target protein to calculate the binding-site centroid coordinates.
@@ -416,7 +471,6 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
                     extract_top_ligand_pose(output_sdf, top_pose_sdf)
 
                     if convert_ligand_pose_to_pdb(top_pose_sdf, top_pose_pdb):
-                        # Use clean target PDB for complex creation to keep Discovery Studio happy
                         create_protein_ligand_complex(clean_target_pdb_path, top_pose_pdb, complex_pdb)
                     else:
                         status_log += f"\n     ⚠️ Could not convert pose to PDB for {mol_name}"
