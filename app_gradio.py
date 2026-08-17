@@ -122,39 +122,40 @@ def convert_ligand_pose_to_pdb(sdf_path, pdb_path):
     except Exception as e:
         print(f"Ligand SDF->PDB conversion error: {e}")
         return False
+def create_protein_ligand_complex(receptor_path, ligand_sdf_path, output_complex_path):
+    """
+    Merges the receptor and ligand into a clean PDB complex file suitable for Discovery Studio.
+    Handles both PDB and PDBQT receptor inputs.
+    """
+    receptor_lines = []
+    # Read receptor file (handles both .pdb and .pdbqt)
+    with open(receptor_path, 'r') as f:
+        for line in f:
+            # Keep ATOM or HETATM records for protein, strip extra PDBQT columns if necessary
+            if line.startswith("ATOM") or line.startswith("HETATM"):
+                # Standard PDB format line length is usually up column 66, 
+                # truncating trailing PDBQT specific tags (like charge/type) for clean visualization
+                clean_line = line[:66] + "\n"
+                receptor_lines.append(clean_line)
+            elif line.startswith("REMARK") or line.startswith("TER"):
+                receptor_lines.append(line)
+
+    # Read top ligand pose from SDF and convert to PDB block using RDKit
+    from rdkit import Chem
+    suppl = Chem.SDMolSupplier(ligand_sdf_path)
+    mol = next(suppl, None)
+    
+    ligand_pdb_block = Chem.MolToPDBBlock(mol) if mol is not None else ""
+
+    # Write out the combined complex PDB
+    with open(output_complex_path, 'w') as out_f:
+        out_f.writelines(receptor_lines)
+        out_f.write("TER\n")
+        out_f.write(ligand_pdb_block)
+        out_f.write("END\n")
 
 
-def create_protein_ligand_complex(receptor_pdbqt, top_ligand_pdb, output_complex_pdb):
-    water_res_names = {"HOH", "WAT", "SOL", "TIP3"}
-
-    clean_receptor_pdb = receptor_pdbqt.replace(".pdbqt", "_clean.pdb")
-    pdbqt_to_pdb_standard(receptor_pdbqt, clean_receptor_pdb)
-
-    try:
-        with open(output_complex_pdb, 'w') as complex_file:
-            if os.path.exists(clean_receptor_pdb):
-                with open(clean_receptor_pdb, 'r') as f_rec:
-                    for line in f_rec:
-                        if line.startswith(("ATOM", "HETATM")):
-                            res_name = line[17:20].strip()
-                            if res_name not in water_res_names:
-                                complex_file.write(line)
-
-            complex_file.write("TER\n")
-
-            if os.path.exists(top_ligand_pdb):
-                with open(top_ligand_pdb, 'r') as f_lig:
-                    for line in f_lig:
-                        if line.startswith(("ATOM", "HETATM")):
-                            res_name = line[17:20].strip()
-                            if res_name not in water_res_names:
-                                complex_file.write(line)
-
-            complex_file.write("END\n")
-        return True
-    except Exception as e:
-        print(f"Complex generation error: {e}")
-        return False
+          
 
 
 def process_ligands(ligand_file_path, filter_type):
