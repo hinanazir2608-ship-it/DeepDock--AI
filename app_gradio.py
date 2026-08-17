@@ -167,38 +167,34 @@ def convert_ligand_pose_to_pdb(sdf_path, pdb_path):
         return False
 
 
-def create_protein_ligand_complex(receptor_pdb_path: str, ligand_pdb_path: str, output_complex_path: str) -> str:
+def create_protein_ligand_complex(receptor_path, ligand_pdb_path, output_complex_path):
     """
-    Merges a clean receptor PDB and a docked ligand PDB into a single complex PDB file
-    suitable for flawless visualization in Discovery Studio or PyMOL.
+    Merges the clean receptor PDB and ligand PDB into a single PDB complex 
+    for flawless visualization in Discovery Studio or PyMOL.
     """
     receptor_lines = []
-    # 1. Read clean receptor atom lines
-    with open(receptor_pdb_path, 'r', encoding="utf-8", errors="ignore") as f:
+    with open(receptor_path, 'r', encoding="utf-8", errors="ignore") as f:
         for line in f:
             if line.startswith(("ATOM", "HETATM")):
-                # Ensure standard 66-char formatting
                 receptor_lines.append(line[:66].ljust(66) + "\n")
             elif line.startswith(("TER", "REMARK")):
                 receptor_lines.append(line if line.endswith("\n") else line + "\n")
 
-    # 2. Read ligand atom lines
     ligand_lines = []
     if os.path.exists(ligand_pdb_path):
         with open(ligand_pdb_path, 'r', encoding="utf-8", errors="ignore") as f:
             for line in f:
                 if line.startswith(("ATOM", "HETATM")):
-                    # Optional: Change HETATM to ATOM or keep as HETATM for ligand
                     ligand_lines.append(line[:66].ljust(66) + "\n")
 
-    # 3. Write combined complex
     with open(output_complex_path, 'w', encoding="utf-8") as out_f:
         out_f.writelines(receptor_lines)
         out_f.write("TER\n")
         out_f.writelines(ligand_lines)
         out_f.write("END\n")
 
-    return output_complex_path
+    return os.path.exists(output_complex_path)
+
 
 def process_ligands(ligand_file_path, filter_type):
     """
@@ -267,7 +263,6 @@ def write_single_ligand_sdf(mol, mol_name, temp_dir):
 
 def run_gnina_docking(clean_target_path, ligand_path, output_path,
                        center_x, center_y, center_z, size_x, size_y, size_z):
-    # Try using 'gnina' command first, fallback to 'gninabase' if needed
     for exe in ["gnina", "gninabase"]:
         cmd = [
             exe,
@@ -370,12 +365,10 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
         if ligand_file is None or target_file is None:
             return "❌ Error: Upload both files.", filtered_df, docking_df, admet_df, None, None, None, None
 
-        status_log += "\n[1/3] Parsing & Cleaning Target Protein (Direct PDB Cleaning for GNINA)..."
+        status_log += "\n[1/3] Parsing & Cleaning Target Protein..."
         temp_dir = tempfile.mkdtemp()
         
         clean_target_pdb_path = os.path.join(temp_dir, "clean_receptor.pdb")
-        
-        # Clean target structure directly into a clean PDB (no PDBQT required for GNINA)
         clean_and_prepare_receptor(target_file.name, clean_target_pdb_path)
 
         atom_count, calculated_centroid = parse_protein_pdb(clean_target_pdb_path)
@@ -390,7 +383,7 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
         status_log += f"\n[2/3] Processing Ligands (Filter: {filter_type})..."
         filtered_df, valid_mols = process_ligands(ligand_file.name, filter_type)
 
-        status_log += "\n[3/3] Running GNINA Docking & ADMET Analysis..."
+        status_log += "\n[3/3] Running GNINA Docking & Complex Generation..."
 
         complexes_dir = os.path.join(temp_dir, "protein_ligand_complexes")
         os.makedirs(complexes_dir, exist_ok=True)
@@ -417,7 +410,6 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
 
                 ligand_sdf = write_single_ligand_sdf(row_mol, mol_safe_name, temp_dir)
 
-                # Passes clean PDB directly to GNINA
                 gnina_stdout, gnina_stderr, exit_code = run_gnina_docking(
                     clean_target_pdb_path, ligand_sdf, output_sdf,
                     final_cx, final_cy, final_cz, size_x, size_y, size_z
@@ -427,12 +419,16 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
                     status_log += f"\n     ⚠️ GNINA failed for {mol_name}: {gnina_stderr.strip()[:200]}"
                     score, cnn_score, cnn_affinity = None, None, None
                 else:
+                    # Step 1: Extract top pose and convert to PDB
                     extract_top_ligand_pose(output_sdf, top_pose_sdf)
+                    convert_ligand_pose_to_pdb(top_pose_sdf, top_pose_pdb)
 
-                    if convert_ligand_pose_to_pdb(top_pose_sdf, top_pose_pdb):
-                        create_protein_ligand_complex(clean_target_pdb_path, top_pose_pdb, complex_pdb)
-                    else:
-                        status_log += f"\n     ⚠️ Could not convert pose to PDB for {mol_name}"
+                    # Step 2: Create Perfect Protein-Ligand Complex PDB
+                    create_protein_ligand_complex(
+                        clean_target_pdb_path, 
+                        top_pose_pdb, 
+                        complex_pdb
+                    )
 
                     parsed = parse_gnina_score(top_pose_sdf)
                     score, cnn_score, cnn_affinity = parsed["affinity"], parsed["cnn_score"], parsed["cnn_affinity"]
@@ -479,7 +475,7 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
                     file_path = os.path.join(root, file)
                     zipf.write(file_path, arcname=os.path.join("complexes", file))
 
-        status_log += "\n\n✨ [SUCCESS] Pipeline complete! All CSV files & ZIP ready for download."
+        status_log += "\n\n✨ [SUCCESS] Pipeline complete! All CSV files & Complex PDBs ready in ZIP archive."
 
     except Exception as e:
         status_log += f"\n\n❌ [ERROR]: Pipeline failed due to: {str(e)}"
@@ -518,7 +514,7 @@ with gr.Blocks(title="DeepDock-AI") as demo:
             filter_csv_download = gr.File(label="📥 Download Filtered Ligands (CSV)")
 
         with gr.TabItem("2. Docking Results"):
-            docking_df_output = gr.DataFrame(label="AutoDock Vina / GNINA Scores (Best Mode RMSD=0)")
+            docking_df_output = gr.DataFrame(label="AutoDock Vina / GNINA Scores")
             docking_csv_download = gr.File(label="📥 Download Docking Results (CSV)")
 
         with gr.TabItem("3. ADMET Analysis"):
@@ -528,7 +524,7 @@ with gr.Blocks(title="DeepDock-AI") as demo:
     with gr.Row():
         zip_output = gr.File(label="📦 Download Complete Package (All CSVs + Complex PDBs ZIP)")
 
-    submit_df = submit_btn.click(
+    submit_btn.click(
         fn=run_deepdock_pipeline,
         inputs=[
             ligand_input, filter_input, target_input,
