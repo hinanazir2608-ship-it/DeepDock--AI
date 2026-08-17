@@ -23,19 +23,18 @@ FORCE_CPU = False
 # 1. HELPER & PREPROCESSING FUNCTIONS
 # ==========================================
 
-def clean_and_prepare_receptor(target_file_path, output_pdb_path, output_pdbqt_path):
+def clean_and_prepare_receptor(target_file_path, output_pdb_path):
     """
-    Strictly formats PDB and PDBQT according to official AutoDock fixed-width specifications:
-    - Removes water and heteroatoms.
-    - Maps atoms to correct AutoDock types.
-    - Handles 3 arguments cleanly without missing dependencies.
+    Simple & Clean PDB preparation:
+    - Reads raw PDB file.
+    - Removes water (HOH, WAT) and heteroatoms (HETATM).
+    - Writes a clean PDB file that GNINA accepts directly.
     """
     try:
         with open(target_file_path, "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
 
         cleaned_pdb_lines = []
-        pdbqt_lines = []
         current_chain = None
 
         for line in lines:
@@ -54,68 +53,16 @@ def clean_and_prepare_receptor(target_file_path, output_pdb_path, output_pdbqt_p
                 chain_id = line[21] if len(line) > 21 else 'A'
                 if current_chain is not None and chain_id != current_chain:
                     cleaned_pdb_lines.append("TER\n")
-                    pdbqt_lines.append("TER\n")
                 current_chain = chain_id
 
-                # 1. Standard PDB line for visualization
                 std_line = line[:66].ljust(66) + "\n"
                 cleaned_pdb_lines.append(std_line)
 
-                # 2. Extract coordinates safely from standard positions
-                try:
-                    x_str = line[30:38].strip()
-                    y_str = line[38:46].strip()
-                    z_str = line[46:54].strip()
-                    x = float(x_str)
-                    y = float(y_str)
-                    z = float(z_str)
-                except ValueError:
-                    continue
-
-                # 3. Extract atom name & map to valid AutoDock atom type
-                atom_name = line[12:16].strip()
-                element = ''.join([c for c in atom_name if c.isalpha()]).upper()[:1]
-
-                if element == 'C':
-                    ad_type = 'A'
-                elif element == 'N':
-                    ad_type = 'N'
-                elif element == 'O':
-                    ad_type = 'OA'
-                elif element == 'S':
-                    ad_type = 'SA'
-                elif element == 'P':
-                    ad_type = 'P'
-                elif element == 'H':
-                    ad_type = 'HD' if atom_name.startswith('H') else 'H'
-                else:
-                    ad_type = element if len(element) == 1 else 'A'
-
-                charge_str = " 0.0000"
-
-                # 4. Construct strictly aligned PDBQT line using official fixed widths
-                atom_num = line[6:11].strip().rjust(5)
-                at_name = line[12:16].ljust(4)
-                alt_loc = line[16:17]
-                res_name = line[17:20].ljust(3)
-                ch_id = line[21:22].ljust(1)
-                res_seq = line[22:26].strip().rjust(4)
-
-                pdbqt_line = (
-                    f"ATOM  {atom_num} {at_name}{alt_loc}{res_name} {ch_id}{res_seq}    "
-                    f"{x:8.3f}{y:8.3f}{z:8.3f}{charge_str} {ad_type:>2}\n"
-                )
-                pdbqt_lines.append(pdbqt_line)
-
             elif line.startswith(("TER", "HEADER", "REMARK", "MODEL", "ENDMDL")):
                 cleaned_pdb_lines.append(line if line.endswith("\n") else line + "\n")
-                pdbqt_lines.append(line if line.endswith("\n") else line + "\n")
 
         with open(output_pdb_path, "w", encoding="utf-8") as f:
             f.writelines(cleaned_pdb_lines)
-
-        with open(output_pdbqt_path, "w", encoding="utf-8") as f:
-            f.writelines(pdbqt_lines)
 
         return True
     except Exception as e:
@@ -150,17 +97,17 @@ def clean_dataframe_indices(df, pubchem_col_name="PubChem CID"):
     return df
 
 
-def parse_protein_pdbqt(pdbqt_file_path):
+def parse_protein_pdb(pdb_file_path):
     """
-    Parses PDBQT target protein to calculate the binding-site centroid coordinates.
+    Parses clean PDB target protein to calculate the binding-site centroid coordinates.
     """
     coords = []
-    if not pdbqt_file_path or not os.path.exists(pdbqt_file_path):
+    if not pdb_file_path or not os.path.exists(pdb_file_path):
         return 0, (0.0, 0.0, 0.0)
 
-    with open(pdbqt_file_path, 'r', encoding="utf-8", errors="ignore") as f:
+    with open(pdb_file_path, 'r', encoding="utf-8", errors="ignore") as f:
         for line in f:
-            if line.startswith("ATOM") or line.startswith("HETATM"):
+            if line.startswith("ATOM"):
                 try:
                     x = float(line[30:38].strip())
                     y = float(line[38:46].strip())
@@ -312,29 +259,34 @@ def write_single_ligand_sdf(mol, mol_name, temp_dir):
 
 def run_gnina_docking(clean_target_path, ligand_path, output_path,
                        center_x, center_y, center_z, size_x, size_y, size_z):
-    cmd = [
-        "gnina",
-        "-r", clean_target_path,
-        "-l", ligand_path,
-        "-o", output_path,
-        "--center_x", str(center_x),
-        "--center_y", str(center_y),
-        "--center_z", str(center_z),
-        "--size_x", str(size_x),
-        "--size_y", str(size_y),
-        "--size_z", str(size_z),
-        "--num_modes", "9",
-        "--cnn_scoring", "rescore",
-        "--seed", str(GNINA_SEED),
-    ]
-    if FORCE_CPU:
-        cmd.append("--no_gpu")
+    # Try using 'gnina' command first, fallback to 'gninabase' if needed
+    for exe in ["gnina", "gninabase"]:
+        cmd = [
+            exe,
+            "-r", clean_target_path,
+            "-l", ligand_path,
+            "-o", output_path,
+            "--center_x", str(center_x),
+            "--center_y", str(center_y),
+            "--center_z", str(center_z),
+            "--size_x", str(size_x),
+            "--size_y", str(size_y),
+            "--size_z", str(size_z),
+            "--num_modes", "9",
+            "--cnn_scoring", "rescore",
+            "--seed", str(GNINA_SEED),
+        ]
+        if FORCE_CPU:
+            cmd.append("--no_gpu")
 
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        return result.stdout, result.stderr, result.returncode
-    except FileNotFoundError:
-        return "", "GNINA binary not found in system PATH.", 1
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0 or "Error" not in result.stderr:
+                return result.stdout, result.stderr, result.returncode
+        except FileNotFoundError:
+            continue
+
+    return "", "GNINA / gninabase binary not found in system PATH.", 1
 
 
 def _safe_float(val):
@@ -410,16 +362,15 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
         if ligand_file is None or target_file is None:
             return "❌ Error: Upload both files.", filtered_df, docking_df, admet_df, None, None, None, None
 
-        status_log += "\n[1/3] Parsing & Cleaning Target Protein (Removing Water & Formatting PDBQT)..."
+        status_log += "\n[1/3] Parsing & Cleaning Target Protein (Direct PDB Cleaning for GNINA)..."
         temp_dir = tempfile.mkdtemp()
         
         clean_target_pdb_path = os.path.join(temp_dir, "clean_receptor.pdb")
-        target_pdbqt_path = os.path.join(temp_dir, "receptor.pdbqt")
         
-        # Clean target structure, strip water, and generate valid PDB/PDBQT files
-        clean_and_prepare_receptor(target_file.name, clean_target_pdb_path, target_pdbqt_path)
+        # Clean target structure directly into a clean PDB (no PDBQT required for GNINA)
+        clean_and_prepare_receptor(target_file.name, clean_target_pdb_path)
 
-        atom_count, calculated_centroid = parse_protein_pdbqt(target_pdbqt_path)
+        atom_count, calculated_centroid = parse_protein_pdb(clean_target_pdb_path)
         status_log += f"\n     ✔ Protein Cleaned & Parsed successfully! ({atom_count} atoms)"
 
         final_cx = custom_cx if custom_cx != 0.0 else calculated_centroid[0]
@@ -458,9 +409,9 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
 
                 ligand_sdf = write_single_ligand_sdf(row_mol, mol_safe_name, temp_dir)
 
-                # Use target_pdbqt_path for precise docking execution
+                # Passes clean PDB directly to GNINA
                 gnina_stdout, gnina_stderr, exit_code = run_gnina_docking(
-                    target_pdbqt_path, ligand_sdf, output_sdf,
+                    clean_target_pdb_path, ligand_sdf, output_sdf,
                     final_cx, final_cy, final_cz, size_x, size_y, size_z
                 )
 
@@ -538,7 +489,7 @@ with gr.Blocks(title="DeepDock-AI") as demo:
     with gr.Row():
         ligand_input = gr.File(label="Upload Ligand File (.sdf, .csv)")
         filter_input = gr.Dropdown(["Lipinski", "None"], value="Lipinski", label="Filter Type")
-        target_input = gr.File(label="Upload Target Protein (.pdb or .pdbqt)")
+        target_input = gr.File(label="Upload Target Protein (.pdb)")
 
     with gr.Accordion("🎯 Binding Site Grid Box Coordinates (Optional)", open=True):
         with gr.Row():
@@ -569,7 +520,7 @@ with gr.Blocks(title="DeepDock-AI") as demo:
     with gr.Row():
         zip_output = gr.File(label="📦 Download Complete Package (All CSVs + Complex PDBs ZIP)")
 
-    submit_btn.click(
+    submit_df = submit_btn.click(
         fn=run_deepdock_pipeline,
         inputs=[
             ligand_input, filter_input, target_input,
