@@ -13,7 +13,6 @@ RDLogger.DisableLog('rdApp.*')
 
 from rdkit import Chem
 from rdkit.Chem import Descriptors, Lipinski
-from modules.export import pdbqt_to_pdb_standard
 
 # 🔒 Fixed Seed
 GNINA_SEED = 42
@@ -51,6 +50,52 @@ def clean_dataframe_indices(df, pubchem_col_name="PubChem CID"):
     return df
 
 
+def clean_and_prepare_receptor(target_file_path, output_pdb_path, output_pdbqt_path):
+    """
+    Cleans target PDB/PDBQT file to ensure standard atom records and TER cards 
+    are preserved so Discovery Studio does not render fragmented protein structures.
+    Also creates a clean PDB for visualization and PDBQT for GNINA docking.
+    """
+    try:
+        with open(target_file_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+
+        cleaned_pdb_lines = []
+        pdbqt_lines = []
+        current_chain = None
+
+        for line in lines:
+            if line.startswith(("ATOM", "HETATM")):
+                chain_id = line[21] if len(line) > 21 else 'A'
+                if current_chain is not None and chain_id != current_chain:
+                    cleaned_pdb_lines.append("TER\n")
+                    pdbqt_lines.append("TER\n")
+                current_chain = chain_id
+
+                std_line = line[:66].ljust(66) + "\n"
+                cleaned_pdb_lines.append(std_line)
+
+                if len(line.rstrip()) >= 70:
+                    pdbqt_lines.append(line if line.endswith("\n") else line + "\n")
+                else:
+                    pdbqt_lines.append(line.strip() + "  0.00\n")
+
+            elif line.startswith(("TER", "HEADER", "REMARK", "MODEL", "ENDMDL")):
+                cleaned_pdb_lines.append(line if line.endswith("\n") else line + "\n")
+                pdbqt_lines.append(line if line.endswith("\n") else line + "\n")
+
+        with open(output_pdb_path, "w", encoding="utf-8") as f:
+            f.writelines(cleaned_pdb_lines)
+
+        with open(output_pdbqt_path, "w", encoding="utf-8") as f:
+            f.writelines(pdbqt_lines)
+
+        return True
+    except Exception as e:
+        print(f"[ERROR] Receptor cleaning failed: {e}")
+        return False
+
+
 def parse_protein_pdbqt(pdbqt_file_path):
     """
     Parses PDBQT target protein to calculate the binding-site centroid coordinates.
@@ -59,7 +104,7 @@ def parse_protein_pdbqt(pdbqt_file_path):
     if not pdbqt_file_path or not os.path.exists(pdbqt_file_path):
         return 0, (0.0, 0.0, 0.0)
 
-    with open(pdbqt_file_path, 'r') as f:
+    with open(pdbqt_file_path, 'r', encoding="utf-8", errors="ignore") as f:
         for line in f:
             if line.startswith("ATOM") or line.startswith("HETATM"):
                 try:
@@ -127,7 +172,7 @@ def create_protein_ligand_complex(receptor_path, ligand_sdf_path, output_complex
     for flawless visualization in Discovery Studio.
     """
     receptor_lines = []
-    with open(receptor_path, 'r') as f:
+    with open(receptor_path, 'r', encoding="utf-8", errors="ignore") as f:
         for line in f:
             if line.startswith("ATOM") or line.startswith("HETATM"):
                 clean_line = line[:66] + "\n"
@@ -139,7 +184,7 @@ def create_protein_ligand_complex(receptor_path, ligand_sdf_path, output_complex
     mol = next(suppl, None)
     ligand_pdb_block = Chem.MolToPDBBlock(mol) if mol is not None else ""
 
-    with open(output_complex_path, 'w') as out_f:
+    with open(output_complex_path, 'w', encoding="utf-8") as out_f:
         out_f.writelines(receptor_lines)
         out_f.write("TER\n")
         out_f.write(ligand_pdb_block)
@@ -204,7 +249,6 @@ def gnina_gpu_available():
 
 
 def write_single_ligand_sdf(mol, mol_name, temp_dir):
-    """Writes ONE molecule to its unique SDF file path."""
     path = os.path.join(temp_dir, f"{mol_name}_input.sdf")
     writer = Chem.SDWriter(path)
     writer.write(mol)
@@ -255,9 +299,6 @@ def _safe_float(val):
 
 
 def parse_gnina_score(top_pose_sdf_path):
-    """
-    Parses Minimized Affinity, CNN score, and CNN affinity robustly from the top pose SDF.
-    """
     affinity, cnn_score, cnn_affinity = None, None, None
 
     if not os.path.exists(top_pose_sdf_path):
@@ -318,20 +359,14 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
         status_log += "\n[1/3] Parsing & Cleaning Target Protein..."
         temp_dir = tempfile.mkdtemp()
         
-        # 🛠️ FIX: Convert target PDBQT to standard clean PDB immediately for DS Visualizer
         clean_target_pdb_path = os.path.join(temp_dir, "clean_receptor.pdb")
-        try:
-            pdbqt_to_pdb_standard(target_file.name, clean_target_pdb_path)
-        except Exception:
-            with open(target_file.name, 'r') as f_in, open(clean_target_pdb_path, 'w') as f_out:
-                for line in f_in:
-                    if line.startswith("ATOM") or line.startswith("HETATM"):
-                        f_out.write(line[:66] + "\n")
-                    elif line.startswith("TER") or line.startswith("REMARK"):
-                        f_out.write(line)
+        target_pdbqt_path = os.path.join(temp_dir, "receptor.pdbqt")
+        
+        # Clean target structure and generate valid PDB/PDBQT files
+        clean_and_prepare_receptor(target_file.name, clean_target_pdb_path, target_pdbqt_path)
 
-        atom_count, calculated_centroid = parse_protein_pdbqt(clean_target_pdb_path)
-        status_log += f"\n     ✔ Protein Cleaned & Parsed successfully!"
+        atom_count, calculated_centroid = parse_protein_pdbqt(target_pdbqt_path)
+        status_log += f"\n     ✔ Protein Cleaned & Parsed successfully! ({atom_count} atoms)"
 
         final_cx = custom_cx if custom_cx != 0.0 else calculated_centroid[0]
         final_cy = custom_cy if custom_cy != 0.0 else calculated_centroid[1]
@@ -369,9 +404,9 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
 
                 ligand_sdf = write_single_ligand_sdf(row_mol, mol_safe_name, temp_dir)
 
-                # Use clean target PDB for docking
+                # Use target_pdbqt_path for precise docking execution
                 gnina_stdout, gnina_stderr, exit_code = run_gnina_docking(
-                    clean_target_pdb_path, ligand_sdf, output_sdf,
+                    target_pdbqt_path, ligand_sdf, output_sdf,
                     final_cx, final_cy, final_cz, size_x, size_y, size_z
                 )
 
@@ -382,10 +417,10 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
                     extract_top_ligand_pose(output_sdf, top_pose_sdf)
 
                     if convert_ligand_pose_to_pdb(top_pose_sdf, top_pose_pdb):
-                        # Use clean target PDB for complex creation
+                        # Use clean target PDB for complex creation to keep Discovery Studio happy
                         create_protein_ligand_complex(clean_target_pdb_path, top_pose_pdb, complex_pdb)
                     else:
-                        status_log += f"\n     ⚠️ Could not convert pose to PDB for {mol_name}; complex has receptor only"
+                        status_log += f"\n     ⚠️ Could not convert pose to PDB for {mol_name}"
 
                     parsed = parse_gnina_score(top_pose_sdf)
                     score, cnn_score, cnn_affinity = parsed["affinity"], parsed["cnn_score"], parsed["cnn_affinity"]
@@ -450,7 +485,7 @@ with gr.Blocks(title="DeepDock-AI") as demo:
     with gr.Row():
         ligand_input = gr.File(label="Upload Ligand File (.sdf, .csv)")
         filter_input = gr.Dropdown(["Lipinski", "None"], value="Lipinski", label="Filter Type")
-        target_input = gr.File(label="Upload Target PDBQT")
+        target_input = gr.File(label="Upload Target Protein (.pdb or .pdbqt)")
 
     with gr.Accordion("🎯 Binding Site Grid Box Coordinates (Optional)", open=True):
         with gr.Row():
