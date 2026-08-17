@@ -52,9 +52,9 @@ def clean_dataframe_indices(df, pubchem_col_name="PubChem CID"):
 
 def clean_and_prepare_receptor(target_file_path, output_pdb_path, output_pdbqt_path):
     """
-    Cleans target PDB/PDBQT file to ensure standard atom records and TER cards 
-    are preserved so Discovery Studio does not render fragmented protein structures.
-    Also creates a clean PDB for visualization and PDBQT for GNINA docking.
+    Cleans target PDB file, removes water molecules (HOH/WAT), fixes atom types 
+    for AutoDock/GNINA compatibility (eliminating N1+, charges errors), and generates 
+    clean PDB (for visualization) and clean PDBQT (for docking).
     """
     try:
         with open(target_file_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -65,6 +65,10 @@ def clean_and_prepare_receptor(target_file_path, output_pdb_path, output_pdbqt_p
         current_chain = None
 
         for line in lines:
+            # 🛑 Skip water molecules automatically to prevent docking interference
+            if any(wat_tag in line for wat_tag in ["HOH", "WAT"]):
+                continue
+
             if line.startswith(("ATOM", "HETATM")):
                 chain_id = line[21] if len(line) > 21 else 'A'
                 if current_chain is not None and chain_id != current_chain:
@@ -72,13 +76,39 @@ def clean_and_prepare_receptor(target_file_path, output_pdb_path, output_pdbqt_p
                     pdbqt_lines.append("TER\n")
                 current_chain = chain_id
 
+                # 1. Standard PDB line for visualization
                 std_line = line[:66].ljust(66) + "\n"
                 cleaned_pdb_lines.append(std_line)
 
-                if len(line.rstrip()) >= 70:
-                    pdbqt_lines.append(line if line.endswith("\n") else line + "\n")
+                # 2. Extract element symbol to map to valid AutoDock atom types
+                element = ""
+                if len(line) >= 78:
+                    element = line[76:78].strip().upper()
+                
+                if not element or not element.isalpha():
+                    atom_name = line[12:16].strip()
+                    element = ''.join([c for c in atom_name if c.isalpha()]).upper()[:1]
+
+                # Map to standard AutoDock atom types
+                if element == 'C':
+                    ad_type = 'A'
+                elif element == 'N':
+                    ad_type = 'N'
+                elif element == 'O':
+                    ad_type = 'OA'
+                elif element == 'S':
+                    ad_type = 'SA'
+                elif element == 'P':
+                    ad_type = 'P'
+                elif element == 'H':
+                    ad_type = 'HD'
                 else:
-                    pdbqt_lines.append(line.strip() + "  0.00\n")
+                    ad_type = element if len(element) == 1 else 'A'
+
+                # 3. Construct clean PDBQT line with valid atom type and neutral charge
+                clean_prefix = line[:70].ljust(70)
+                strict_pdbqt_line = f"{clean_prefix} {ad_type:<2}  0.00\n"
+                pdbqt_lines.append(strict_pdbqt_line)
 
             elif line.startswith(("TER", "HEADER", "REMARK", "MODEL", "ENDMDL")):
                 cleaned_pdb_lines.append(line if line.endswith("\n") else line + "\n")
@@ -356,13 +386,13 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
         if ligand_file is None or target_file is None:
             return "❌ Error: Upload both files.", filtered_df, docking_df, admet_df, None, None, None, None
 
-        status_log += "\n[1/3] Parsing & Cleaning Target Protein..."
+        status_log += "\n[1/3] Parsing & Cleaning Target Protein (Removing Water & Formatting PDBQT)..."
         temp_dir = tempfile.mkdtemp()
         
         clean_target_pdb_path = os.path.join(temp_dir, "clean_receptor.pdb")
         target_pdbqt_path = os.path.join(temp_dir, "receptor.pdbqt")
         
-        # Clean target structure and generate valid PDB/PDBQT files
+        # Clean target structure, strip water, and generate valid PDB/PDBQT files
         clean_and_prepare_receptor(target_file.name, clean_target_pdb_path, target_pdbqt_path)
 
         atom_count, calculated_centroid = parse_protein_pdbqt(target_pdbqt_path)
