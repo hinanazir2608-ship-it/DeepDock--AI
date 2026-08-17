@@ -403,6 +403,7 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
                         status_log += f"\n     ⚠️ Could not convert pose to PDB for {mol_name}; complex has receptor only"
 
                     parsed = parse_gnina_score(top_pose_sdf)
+                    print(f"DEBUG PARSED VALUES: {parsed}")
                     score, cnn_score, cnn_affinity = parsed["affinity"], parsed["cnn_score"], parsed["cnn_affinity"]
 
                 docking_data.append({
