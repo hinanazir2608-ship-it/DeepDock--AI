@@ -48,10 +48,6 @@ def clean_dataframe_indices(df, pubchem_col_name="PubChem CID"):
 
     return df
 
-import os
-import subprocess
-from Bio import PDB
-
 def clean_and_prepare_receptor(input_pdb_path, output_clean_pdb_path, *args):
     """
     Cleans the target protein PDB by removing water molecules, heteroatoms, 
