@@ -6,8 +6,9 @@ from rdkit import Chem
 
 def pdbqt_to_pdb_standard(pdbqt_file: str, output_pdb_path: str = None) -> str:
     """
-    Converts a PDBQT docking output file into standard PDB format by stripping 
-    AutoDock charge and atom-type columns.
+    Converts a PDBQT docking output or target file into standard PDB format by stripping 
+    AutoDock charge and atom-type columns, and ensuring proper formatting for downstream 
+    visualizers like Discovery Studio.
     """
     if not os.path.exists(pdbqt_file):
         raise FileNotFoundError(f"PDBQT file not found: {pdbqt_file}")
@@ -19,10 +20,10 @@ def pdbqt_to_pdb_standard(pdbqt_file: str, output_pdb_path: str = None) -> str:
     with open(pdbqt_file, "r") as f:
         for line in f:
             if line.startswith(("ATOM", "HETATM")):
-                # Retain standard PDB columns (1 to 66 characters)
+                # Retain standard PDB columns (1 to 66 characters) to remove AutoDock charges/types
                 standard_line = line[:66].ljust(66) + "\n"
                 pdb_lines.append(standard_line)
-            elif line.startswith(("MODEL", "ENDMDL", "TER")):
+            elif line.startswith(("MODEL", "ENDMDL", "TER", "HEADER", "TITLE", "COMPND", "SOURCE", "KEYWDS", "EXPDTA", "AUTHOR", "REMARK")):
                 pdb_lines.append(line)
 
     with open(output_pdb_path, "w") as f:
@@ -34,17 +35,6 @@ def pdbqt_to_pdb_standard(pdbqt_file: str, output_pdb_path: str = None) -> str:
 def create_results_zip(zip_output_path: str, csv_path: str, docked_mols: list = None, mol_names: list = None) -> str:
     """
     Packages screening CSV reports and docked structures into a downloadable ZIP archive.
-
-    FIX 1: Individual SDF files are now written into a tempfile.mkdtemp()
-    directory instead of a hardcoded relative "docked_complexes" folder in
-    the CWD. The old version broke the pipeline's per-run temp-dir isolation
-    (every other function in this pipeline writes inside tempfile.mkdtemp())
-    and could collide across concurrent runs or leave orphaned files behind.
-
-    FIX 2: File names are now prefixed with the loop index (f"{idx}_{name}"),
-    matching the idx_ pattern already used in gradio_app.py. Without it, two
-    compounds sharing a name (or any repeat in mol_names) would silently
-    overwrite each other's SDF before it ever reached the ZIP.
     """
     with zipfile.ZipFile(zip_output_path, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
         # Add CSV Report if available
