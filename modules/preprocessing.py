@@ -47,8 +47,20 @@ def _extract_cid(mol: Chem.Mol, idx: int, name: str) -> str:
 
 def clean_and_prepare_receptor(target_file_path, output_pdb_path, output_pdbqt_path):
     """
-    Cleans target PDB file, removes water and heteroatoms, 
-    and outputs strictly formatted PDBQT compatible with GNINA/AutoDock.
+    Strictly formats PDB and PDBQT according to official AutoDock fixed-width specifications:
+    ATOM columns: 
+    - 0-6:   Record name ("ATOM  ")
+    - 6-11:  Atom serial number
+    - 12-16: Atom name
+    - 16:    Alternate location indicator
+    - 17-20: Residue name
+    - 21:    Chain identifier
+    - 22-25: Residue sequence number
+    - 30-38: X coordinate
+    - 38-46: Y coordinate
+    - 46-54: Z coordinate
+    - 60-66: Occupancy / Charge
+    - 70-76: AutoDock atom type
     """
     try:
         with open(target_file_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -63,11 +75,14 @@ def clean_and_prepare_receptor(target_file_path, output_pdb_path, output_pdbqt_p
             if any(wat in line for wat in ["HOH", "WAT"]):
                 continue
             
-            # Skip heteroatoms if you want pure protein residues
+            # Skip heteroatoms
             if line.startswith("HETATM"):
                 continue
 
             if line.startswith("ATOM"):
+                if len(line) < 54:
+                    continue
+
                 chain_id = line[21] if len(line) > 21 else 'A'
                 if current_chain is not None and chain_id != current_chain:
                     cleaned_pdb_lines.append("TER\n")
@@ -78,16 +93,21 @@ def clean_and_prepare_receptor(target_file_path, output_pdb_path, output_pdbqt_p
                 std_line = line[:66].ljust(66) + "\n"
                 cleaned_pdb_lines.append(std_line)
 
-                # 2. Extract element symbol to map to valid AutoDock atom types
-                element = ""
-                if len(line) >= 78:
-                    element = line[76:78].strip().upper()
-                
-                if not element or not element.isalpha():
-                    atom_name = line[12:16].strip()
-                    element = ''.join([c for c in atom_name if c.isalpha()]).upper()[:1]
+                # 2. Extract coordinates safely from standard positions
+                try:
+                    x_str = line[30:38].strip()
+                    y_str = line[38:46].strip()
+                    z_str = line[46:54].strip()
+                    x = float(x_str)
+                    y = float(y_str)
+                    z = float(z_str)
+                except ValueError:
+                    continue
 
-                # Map to standard AutoDock atom types
+                # 3. Extract atom name & map to valid AutoDock atom type
+                atom_name = line[12:16].strip()
+                element = ''.join([c for c in atom_name if c.isalpha()]).upper()[:1]
+
                 if element == 'C':
                     ad_type = 'A'
                 elif element == 'N':
@@ -99,18 +119,26 @@ def clean_and_prepare_receptor(target_file_path, output_pdb_path, output_pdbqt_p
                 elif element == 'P':
                     ad_type = 'P'
                 elif element == 'H':
-                    atom_name = line[12:16].strip()
                     ad_type = 'HD' if atom_name.startswith('H') else 'H'
                 else:
                     ad_type = element if len(element) == 1 else 'A'
 
-                # 3. Strictly formatted PDBQT line (Columns 0-54: standard coords/prefix, 
-                # followed by exact AutoDock spacing for charge and atom type)
-                prefix = line[:54]  # ATOM serial, name, resName, chain, resSeq, X, Y, Z
-                
-                # Standard AutoDock PDBQT format: 
-                # [Prefix up to coords] + [Charge (6 spaces, e.g., "  0.00")] + [Spacing] + [Atom Type]
-                pdbqt_line = f"{prefix}  0.0000 {ad_type:>2}\n"
+                # Extract partial charge if present, otherwise default to 0.0
+                charge_str = " 0.0000"
+
+                # 4. Construct strictly aligned PDBQT line using official fixed widths
+                # Format: ATOM [5s] [4s] [1s] [3s] [1s] [4s]    [8s][8s][8s]      [6s]  [2s]
+                atom_num = line[6:11].strip().rjust(5)
+                at_name = line[12:16].ljust(4)
+                alt_loc = line[16:17]
+                res_name = line[17:20].ljust(3)
+                ch_id = line[21:22].ljust(1)
+                res_seq = line[22:26].strip().rjust(4)
+
+                pdbqt_line = (
+                    f"ATOM  {atom_num} {at_name}{alt_loc}{res_name} {ch_id}{res_seq}    "
+                    f"{x:8.3f}{y:8.3f}{z:8.3f}{charge_str} {ad_type:>2}\n"
+                )
                 pdbqt_lines.append(pdbqt_line)
 
             elif line.startswith(("TER", "HEADER", "REMARK", "MODEL", "ENDMDL")):
