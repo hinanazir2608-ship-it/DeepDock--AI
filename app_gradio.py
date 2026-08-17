@@ -270,32 +270,47 @@ def _safe_float(val):
 
 def parse_gnina_score(top_pose_sdf_path):
     """
-    FIX: GNINA is called with --cnn_scoring rescore, which writes BOTH
-    CNNscore (pose confidence, 0-1) and CNNaffinity (predicted pK, higher =
-    stronger binding) as SDF property tags on the output molecule. The old
-    version of this function only read CNNscore, so CNNaffinity was parsed
-    into memory by RDKit and then silently discarded every single run.
+    Parses Minimized Affinity, CNN score, and CNN affinity robustly from the top pose SDF.
     """
     affinity, cnn_score, cnn_affinity = None, None, None
 
     if not os.path.exists(top_pose_sdf_path):
         return {"affinity": None, "cnn_score": None, "cnn_affinity": None}
 
-    supplier = Chem.SDMolSupplier(top_pose_sdf_path)
-    mol = next((m for m in supplier if m is not None), None)
+    try:
+        supplier = Chem.SDMolSupplier(top_pose_sdf_path)
+        mol = next((m for m in supplier if m is not None), None)
 
-    if mol is not None:
-        props = mol.GetPropsAsDict()
-        print(f"[DEBUG] props for {top_pose_sdf_path}: {props}")
-        affinity = _safe_float(props.get("minimizedAffinity"))
-        cnn_score = _safe_float(props.get("CNNscore"))
-        cnn_affinity = _safe_float(props.get("CNNaffinity"))
-        if "minimizedAffinity" in props:
-            affinity = round(float(props["minimizedAffinity"]), 2)
-        if "CNNscore" in props:
-            cnn_score = round(float(props["CNNscore"]), 3)
-        if "CNNaffinity" in props:
-            cnn_affinity = round(float(props["CNNaffinity"]), 3)
+        if mol is not None:
+            # Get all property keys available in the molecule SDF block
+            props = mol.GetPropsAsDict()
+            
+            # Case-insensitive / flexible key matching for GNINA properties
+            for key, val in props.items():
+                k_lower = key.lower()
+                if "minimizedaffinity" in k_lower or "affinity" in k_lower:
+                    if affinity is None: # capture Vina score
+                        affinity = _safe_float(val)
+                if "cnnscore" in k_lower:
+                    cnn_score = _safe_float(val)
+                if "cnnaffinity" in k_lower:
+                    cnn_affinity = _safe_float(val)
+
+            # Fallback direct checks if flexible matching missed anything
+            if affinity is None and props.get("minimizedAffinity") is not None:
+                affinity = _safe_float(props.get("minimizedAffinity"))
+            if cnn_score is None and props.get("CNNscore") is not None:
+                cnn_score = _safe_float(props.get("CNNscore"))
+            if cnn_affinity is None and props.get("CNNaffinity") is not None:
+                cnn_affinity = _safe_float(props.get("CNNaffinity"))
+
+            # Round values neatly if they exist
+            affinity = round(affinity, 2) if affinity is not None else 0.0
+            cnn_score = round(cnn_score, 3) if cnn_score is not None else 0.0
+            cnn_affinity = round(cnn_affinity, 3) if cnn_affinity is not None else 0.0
+
+    except Exception as e:
+        print(f"Error parsing GNINA score: {e}")
 
     return {"affinity": affinity, "cnn_score": cnn_score, "cnn_affinity": cnn_affinity}
 
