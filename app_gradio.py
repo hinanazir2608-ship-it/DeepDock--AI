@@ -48,17 +48,22 @@ def clean_dataframe_indices(df, pubchem_col_name="PubChem CID"):
 
     return df
 
-def clean_and_prepare_receptor(input_pdb_path, output_clean_pdb_path):
+import os
+import subprocess
+from Bio import PDB
+
+def clean_and_prepare_receptor(input_pdb_path, output_clean_pdb_path, *args):
     """
     Cleans the target protein PDB by removing water molecules, heteroatoms, 
     and alternate conformations, then saves a clean PDB file.
+    Accepts additional arguments (*args) to prevent argument count mismatches.
     """
     parser = PDB.PDBParser(QUIET=True)
-    structure = parser.get_receptor("receptor", input_pdb_path) if hasattr(parser, "get_receptor") else parser.get_structure("receptor", input_pdb_path)
+    structure = parser.get_structure("receptor", input_pdb_path)
     
     class SelectiveDeleter(PDB.Select):
         def accept_residue(self, residue):
-            # Exclude water molecules and standard heteroatoms if desired
+            # Exclude water molecules
             if residue.id[0].startswith("W"):
                 return False
             return True
@@ -67,10 +72,9 @@ def clean_and_prepare_receptor(input_pdb_path, output_clean_pdb_path):
     io.set_structure(structure)
     io.save(output_clean_pdb_path, SelectiveDeleter())
     
-    # Generate PDBQT using Open Babel or MGLTools (AutoDockTools) if available
+    # Generate PDBQT using Open Babel if available
     output_pdbqt_path = output_clean_pdb_path.replace(".pdb", ".pdbqt")
     
-    # Example using Open Babel CLI subprocess call
     try:
         subprocess.run(
             ["obabel", output_clean_pdb_path, "-O", output_pdbqt_path, "-xr"],
@@ -90,9 +94,11 @@ if __name__ == "__main__":
     clean_pdb = "target_clean.pdb"
     
     if os.path.exists(raw_pdb):
+        # Now safely handles 2 or more arguments if your pipeline passes extra context
         clean_and_prepare_receptor(raw_pdb, clean_pdb)
     else:
         print(f"Input file {raw_pdb} not found. Please provide a valid receptor PDB.")
+        
 def parse_protein_pdbqt(pdbqt_file_path):
     """
     Parses PDBQT target protein to calculate the binding-site centroid coordinates.
