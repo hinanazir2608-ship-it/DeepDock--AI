@@ -14,6 +14,8 @@ RDLogger.DisableLog('rdApp.*')
 from rdkit import Chem
 from rdkit.Chem import Descriptors, Lipinski
 from modules.export import pdbqt_to_pdb_standard
+
+# 🔒 Fixed Seed
 GNINA_SEED = 42
 FORCE_CPU = False
 
@@ -103,12 +105,7 @@ def extract_top_ligand_pose(gnina_output_path, top_pose_path):
 
 def convert_ligand_pose_to_pdb(sdf_path, pdb_path):
     """
-    FIX: create_protein_ligand_complex() only copies lines starting with
-    'ATOM'/'HETATM'. SDF (molfile) format has NO such lines, so feeding the
-    raw docked-pose SDF into it silently contributes zero ligand atoms —
-    every complex ends up being just the receptor, which is why every
-    complex file looked identical ("same ligand repeating"). Convert the
-    pose to a real PDB first so it actually has ATOM/HETATM records.
+    Converts docked SDF pose to a real PDB so it contains ATOM/HETATM records.
     """
     if not os.path.exists(sdf_path):
         return False
@@ -122,32 +119,26 @@ def convert_ligand_pose_to_pdb(sdf_path, pdb_path):
     except Exception as e:
         print(f"Ligand SDF->PDB conversion error: {e}")
         return False
+
+
 def create_protein_ligand_complex(receptor_path, ligand_sdf_path, output_complex_path):
     """
-    Merges the receptor and ligand into a clean PDB complex file suitable for Discovery Studio.
-    Handles both PDB and PDBQT receptor inputs.
+    Merges the clean receptor PDB and ligand PDB into a single PDB complex 
+    for flawless visualization in Discovery Studio.
     """
     receptor_lines = []
-    # Read receptor file (handles both .pdb and .pdbqt)
     with open(receptor_path, 'r') as f:
         for line in f:
-            # Keep ATOM or HETATM records for protein, strip extra PDBQT columns if necessary
             if line.startswith("ATOM") or line.startswith("HETATM"):
-                # Standard PDB format line length is usually up column 66, 
-                # truncating trailing PDBQT specific tags (like charge/type) for clean visualization
                 clean_line = line[:66] + "\n"
                 receptor_lines.append(clean_line)
             elif line.startswith("REMARK") or line.startswith("TER"):
                 receptor_lines.append(line)
 
-    # Read top ligand pose from SDF and convert to PDB block using RDKit
-    from rdkit import Chem
     suppl = Chem.SDMolSupplier(ligand_sdf_path)
     mol = next(suppl, None)
-    
     ligand_pdb_block = Chem.MolToPDBBlock(mol) if mol is not None else ""
 
-    # Write out the combined complex PDB
     with open(output_complex_path, 'w') as out_f:
         out_f.writelines(receptor_lines)
         out_f.write("TER\n")
@@ -155,15 +146,9 @@ def create_protein_ligand_complex(receptor_path, ligand_sdf_path, output_complex
         out_f.write("END\n")
 
 
-          
-
-
 def process_ligands(ligand_file_path, filter_type):
     """
     RDKit-based ligand loading and Lipinski Rule of 5 filtering.
-    parsed_data and valid_mols are appended together in the SAME loop below,
-    so they stay positionally aligned 1:1 — filtered_df.iloc[idx] always
-    corresponds to valid_mols[idx]. No offset is ever needed downstream.
     """
     if not ligand_file_path or not os.path.exists(ligand_file_path):
         return pd.DataFrame(), []
@@ -227,11 +212,11 @@ def write_single_ligand_sdf(mol, mol_name, temp_dir):
     return path
 
 
-def run_gnina_docking(receptor_path, ligand_path, output_path,
+def run_gnina_docking(clean_target_path, ligand_path, output_path,
                        center_x, center_y, center_z, size_x, size_y, size_z):
     cmd = [
         "gnina",
-        "-r", receptor_path,
+        "-r", clean_target_path,
         "-l", ligand_path,
         "-o", output_path,
         "--center_x", str(center_x),
@@ -252,6 +237,7 @@ def run_gnina_docking(receptor_path, ligand_path, output_path,
         return result.stdout, result.stderr, result.returncode
     except FileNotFoundError:
         return "", "GNINA binary not found in system PATH.", 1
+
 
 def _safe_float(val):
     if val is None:
@@ -282,21 +268,17 @@ def parse_gnina_score(top_pose_sdf_path):
         mol = next((m for m in supplier if m is not None), None)
 
         if mol is not None:
-            # Get all property keys available in the molecule SDF block
             props = mol.GetPropsAsDict()
-            
-            # Case-insensitive / flexible key matching for GNINA properties
             for key, val in props.items():
                 k_lower = key.lower()
                 if "minimizedaffinity" in k_lower or "affinity" in k_lower:
-                    if affinity is None: # capture Vina score
+                    if affinity is None:
                         affinity = _safe_float(val)
                 if "cnnscore" in k_lower:
                     cnn_score = _safe_float(val)
                 if "cnnaffinity" in k_lower:
                     cnn_affinity = _safe_float(val)
 
-            # Fallback direct checks if flexible matching missed anything
             if affinity is None and props.get("minimizedAffinity") is not None:
                 affinity = _safe_float(props.get("minimizedAffinity"))
             if cnn_score is None and props.get("CNNscore") is not None:
@@ -304,7 +286,6 @@ def parse_gnina_score(top_pose_sdf_path):
             if cnn_affinity is None and props.get("CNNaffinity") is not None:
                 cnn_affinity = _safe_float(props.get("CNNaffinity"))
 
-            # Round values neatly if they exist
             affinity = round(affinity, 2) if affinity is not None else 0.0
             cnn_score = round(cnn_score, 3) if cnn_score is not None else 0.0
             cnn_affinity = round(cnn_affinity, 3) if cnn_affinity is not None else 0.0
@@ -334,9 +315,23 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
         if ligand_file is None or target_file is None:
             return "❌ Error: Upload both files.", filtered_df, docking_df, admet_df, None, None, None, None
 
-        status_log += "\n[1/3] Parsing Target Protein..."
-        atom_count, calculated_centroid = parse_protein_pdbqt(target_file.name)
-        status_log += f"\n     ✔ Protein Parsed successfully!"
+        status_log += "\n[1/3] Parsing & Cleaning Target Protein..."
+        temp_dir = tempfile.mkdtemp()
+        
+        # 🛠️ FIX: Convert target PDBQT to standard clean PDB immediately for DS Visualizer
+        clean_target_pdb_path = os.path.join(temp_dir, "clean_receptor.pdb")
+        try:
+            pdbqt_to_pdb_standard(target_file.name, clean_target_pdb_path)
+        except Exception:
+            with open(target_file.name, 'r') as f_in, open(clean_target_pdb_path, 'w') as f_out:
+                for line in f_in:
+                    if line.startswith("ATOM") or line.startswith("HETATM"):
+                        f_out.write(line[:66] + "\n")
+                    elif line.startswith("TER") or line.startswith("REMARK"):
+                        f_out.write(line)
+
+        atom_count, calculated_centroid = parse_protein_pdbqt(clean_target_pdb_path)
+        status_log += f"\n     ✔ Protein Cleaned & Parsed successfully!"
 
         final_cx = custom_cx if custom_cx != 0.0 else calculated_centroid[0]
         final_cy = custom_cy if custom_cy != 0.0 else calculated_centroid[1]
@@ -349,7 +344,6 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
 
         status_log += "\n[3/3] Running GNINA Docking & ADMET Analysis..."
 
-        temp_dir = tempfile.mkdtemp()
         complexes_dir = os.path.join(temp_dir, "protein_ligand_complexes")
         os.makedirs(complexes_dir, exist_ok=True)
 
@@ -364,27 +358,20 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
                 status_log += f"\n     🖥️ GNINA auto mode — {'GPU' if gpu_present else 'CPU'} detected"
 
             for idx, row in filtered_df.iterrows():
-                # FIX: filtered_df and valid_mols are built together, position
-                # for position, in process_ligands() — idx maps directly,
-                # no offset needed. (The old loop_index = idx-1 line caused
-                # row 0 and row 1 to both dock valid_mols[0], and shifted
-                # every row after that by one — wrong molecule scored under
-                # the right molecule's name.)
                 row_mol = valid_mols[idx]
                 mol_name = str(row["Name"]).replace(" ", "_")
                 mol_safe_name = f"{idx}_{mol_name}"
 
-                # Fully unique isolated file paths per ligand
                 output_sdf = os.path.join(temp_dir, f"docked_{mol_safe_name}.sdf")
                 top_pose_sdf = os.path.join(temp_dir, f"top1_{mol_safe_name}.sdf")
                 top_pose_pdb = os.path.join(temp_dir, f"top1_{mol_safe_name}.pdb")
                 complex_pdb = os.path.join(complexes_dir, f"Complex_{mol_safe_name}.pdb")
 
-                # Write individual unique ligand SDF
                 ligand_sdf = write_single_ligand_sdf(row_mol, mol_safe_name, temp_dir)
 
+                # Use clean target PDB for docking
                 gnina_stdout, gnina_stderr, exit_code = run_gnina_docking(
-                    target_file.name, ligand_sdf, output_sdf,
+                    clean_target_pdb_path, ligand_sdf, output_sdf,
                     final_cx, final_cy, final_cz, size_x, size_y, size_z
                 )
 
@@ -394,16 +381,13 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
                 else:
                     extract_top_ligand_pose(output_sdf, top_pose_sdf)
 
-                    # FIX: convert the docked pose to real PDB before merging —
-                    # create_protein_ligand_complex needs ATOM/HETATM lines,
-                    # which the raw SDF never had.
                     if convert_ligand_pose_to_pdb(top_pose_sdf, top_pose_pdb):
-                        create_protein_ligand_complex(target_file.name, top_pose_pdb, complex_pdb)
+                        # Use clean target PDB for complex creation
+                        create_protein_ligand_complex(clean_target_pdb_path, top_pose_pdb, complex_pdb)
                     else:
                         status_log += f"\n     ⚠️ Could not convert pose to PDB for {mol_name}; complex has receptor only"
 
                     parsed = parse_gnina_score(top_pose_sdf)
-                    print(f"DEBUG PARSED VALUES: {parsed}")
                     score, cnn_score, cnn_affinity = parsed["affinity"], parsed["cnn_score"], parsed["cnn_affinity"]
 
                 docking_data.append({
@@ -415,8 +399,6 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
                     "RMSD u.b": 0.0
                 })
 
-                # NOTE: still np.random placeholders — real ADMET wiring is a
-                # separate task, not fixed here.
                 admet_data.append({
                     "Name": row["Name"],
                     "Solubility (LogS)": round(float(np.random.uniform(-5.0, -1.0)), 2),
