@@ -45,47 +45,71 @@ def _extract_cid(mol: Chem.Mol, idx: int, name: str) -> str:
         return name
     return f"CID_{idx}"
 
-def clean_and_prepare_receptor(pdb_bytes: bytes, output_pdb_path: str, output_pdbqt_path: str) -> bool:
+def clean_and_prepare_receptor(target_file_path, output_pdb_path, output_pdbqt_path):
     """
-    Cleans target PDB bytes to ensure standard atom records and TER cards are preserved 
-    so Discovery Studio does not render fragmented protein structures. 
-    Also prepares standard PDB and PDBQT files for GNINA/Vina.
+    Cleans target PDB/PDBQT file, fixes atom types for AutoDock compatibility 
+    (removes invalid charge suffixes like N1+, C2+, etc.), and generates 
+    clean PDB (for visualization) and clean PDBQT (for GNINA docking).
     """
     try:
-        text = pdb_bytes.decode("utf-8", errors="ignore")
-        lines = text.splitlines()
+        with open(target_file_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
 
         cleaned_pdb_lines = []
         pdbqt_lines = []
-
         current_chain = None
+
         for line in lines:
             if line.startswith(("ATOM", "HETATM")):
-                # Ensure correct columns and chain tracking
                 chain_id = line[21] if len(line) > 21 else 'A'
                 if current_chain is not None and chain_id != current_chain:
                     cleaned_pdb_lines.append("TER\n")
                     pdbqt_lines.append("TER\n")
                 current_chain = chain_id
 
-                # Standard PDB line (1-66 chars)
+                # 1. Clean PDB line for visualization
                 std_line = line[:66].ljust(66) + "\n"
                 cleaned_pdb_lines.append(std_line)
 
-                # PDBQT line (adds dummy charges/types if missing)
-                if len(line) >= 70:
-                    pdbqt_lines.append(line)
+                # 2. Fix PDBQT atom types (extract base atom type from columns 70-79 if needed)
+                # AutoDock atom types are usually found at the end of the line. 
+                # We strip invalid suffixes like '+', '-', digits from the atom type field.
+                parts = line.rstrip().split()
+                if len(parts) >= 8:
+                    atom_type = parts[-1]
+                    # Clean common invalid suffixes causing AutoDock parse errors
+                    if any(char in atom_type for char in ["+", "-"]) or any(char.isdigit() for char in atom_type):
+                        # Fallback to standard element symbol from atom name (cols 12-16)
+                        element_symbol = line[12:16].strip()
+                        for char in element_symbol:
+                            if char.isalpha():
+                                clean_type = char.upper()
+                                break
+                        else:
+                            clean_type = "A"
+                        
+                        # Reconstruct line with clean atom type
+                        base_line = line[:70].ljust(70)
+                        fixed_pdbqt_line = f"{base_line} {clean_type}  0.00\n"
+                        pdbqt_lines.append(fixed_pdbqt_line)
+                    else:
+                        pdbqt_lines.append(line if line.endswith("\n") else line + "\n")
                 else:
-                    pdbqt_lines.append(line.strip() + "  0.00 \n")
+                    # If columns are missing, append default formatted line
+                    atom_name = line[12:16].strip()
+                    elem = ''.join([c for c in atom_name if c.isalpha()]).upper()[:1]
+                    if not elem: elem = "A"
+                    base_line = line[:70].ljust(70)
+                    pdbqt_lines.append(f"{base_line} {elem}  0.00\n")
 
             elif line.startswith(("TER", "HEADER", "REMARK", "MODEL", "ENDMDL")):
-                cleaned_pdb_lines.append(line + "\n" if not line.endswith("\n") else line)
-                pdbqt_lines.append(line + "\n" if not line.endswith("\n") else line)
+                cleaned_pdb_lines.append(line if line.endswith("\n") else line + "\n")
+                pdbqt_lines.append(line if line.endswith("\n") else line + "\n")
 
-        with open(output_pdb_path, "w") as f:
+        with open(output_pdb_path, "w", encoding="utf-8") as f:
             f.writelines(cleaned_pdb_lines)
 
-        with open(output_pdbqt_path, "w") as f:
+        with open(output_pdbqt_path, "w", encoding="utf-8") as f:
             f.writelines(pdbqt_lines)
 
         return True
