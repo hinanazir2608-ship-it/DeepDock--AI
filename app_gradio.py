@@ -257,10 +257,17 @@ def run_gnina_docking(receptor_path, ligand_path, output_path,
 
 
 def parse_gnina_score(top_pose_sdf_path):
-    affinity, cnn_score = None, None
+    """
+    FIX: GNINA is called with --cnn_scoring rescore, which writes BOTH
+    CNNscore (pose confidence, 0-1) and CNNaffinity (predicted pK, higher =
+    stronger binding) as SDF property tags on the output molecule. The old
+    version of this function only read CNNscore, so CNNaffinity was parsed
+    into memory by RDKit and then silently discarded every single run.
+    """
+    affinity, cnn_score, cnn_affinity = None, None, None
 
     if not os.path.exists(top_pose_sdf_path):
-        return {"affinity": None, "cnn_score": None}
+        return {"affinity": None, "cnn_score": None, "cnn_affinity": None}
 
     supplier = Chem.SDMolSupplier(top_pose_sdf_path)
     mol = next((m for m in supplier if m is not None), None)
@@ -271,8 +278,10 @@ def parse_gnina_score(top_pose_sdf_path):
             affinity = round(float(props["minimizedAffinity"]), 2)
         if "CNNscore" in props:
             cnn_score = round(float(props["CNNscore"]), 3)
+        if "CNNaffinity" in props:
+            cnn_affinity = round(float(props["CNNaffinity"]), 3)
 
-    return {"affinity": affinity, "cnn_score": cnn_score}
+    return {"affinity": affinity, "cnn_score": cnn_score, "cnn_affinity": cnn_affinity}
 
 
 # ==========================================
@@ -350,7 +359,7 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
 
                 if exit_code != 0:
                     status_log += f"\n     ⚠️ GNINA failed for {mol_name}: {gnina_stderr.strip()[:200]}"
-                    score, cnn_score = None, None
+                    score, cnn_score, cnn_affinity = None, None, None
                 else:
                     extract_top_ligand_pose(output_sdf, top_pose_sdf)
 
@@ -363,12 +372,13 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
                         status_log += f"\n     ⚠️ Could not convert pose to PDB for {mol_name}; complex has receptor only"
 
                     parsed = parse_gnina_score(top_pose_sdf)
-                    score, cnn_score = parsed["affinity"], parsed["cnn_score"]
+                    score, cnn_score, cnn_affinity = parsed["affinity"], parsed["cnn_score"], parsed["cnn_affinity"]
 
                 docking_data.append({
                     "Name": row["Name"],
                     "Affinity (kcal/mol)": score,
                     "CNN Score": cnn_score,
+                    "CNN Affinity": cnn_affinity,
                     "RMSD l.b": 0.0,
                     "RMSD u.b": 0.0
                 })
