@@ -47,9 +47,11 @@ def _extract_cid(mol: Chem.Mol, idx: int, name: str) -> str:
 
 def clean_and_prepare_receptor(target_file_path, output_pdb_path, output_pdbqt_path):
     """
-    Cleans target PDB/PDBQT file, fixes atom types for AutoDock compatibility 
-    (removes invalid charge suffixes like N1+, C2+, etc.), and generates 
-    clean PDB (for visualization) and clean PDBQT (for GNINA docking).
+    Cleans target PDB/PDBQT file:
+    - Removes all water molecules (HOH, WAT).
+    - Removes all heteroatoms (HETATM) except standard protein backbone/sidechains.
+    - Fixes atom types for AutoDock compatibility (eliminating N1+, charges errors).
+    - Generates clean PDB (for visualization) and clean PDBQT (for GNINA docking).
     """
     try:
         with open(target_file_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -60,47 +62,57 @@ def clean_and_prepare_receptor(target_file_path, output_pdb_path, output_pdbqt_p
         current_chain = None
 
         for line in lines:
-            if line.startswith(("ATOM", "HETATM")):
+            # 1. Skip water molecules and unwanted HETATM (heteroatoms, ions, ligands, cofactors)
+            if any(wat in line for wat in ["HOH", "WAT"]):
+                continue
+            
+            # Agar aap sirf standard ATOM records rakhna chahte hain aur HETATM (heteroatoms) 
+            # ko remove karna chahte hain, toh line.startswith("HETATM") ko yahan skip kar dein:
+            if line.startswith("HETATM"):
+                continue
+
+            if line.startswith("ATOM"):
                 chain_id = line[21] if len(line) > 21 else 'A'
                 if current_chain is not None and chain_id != current_chain:
                     cleaned_pdb_lines.append("TER\n")
                     pdbqt_lines.append("TER\n")
                 current_chain = chain_id
 
-                # 1. Clean PDB line for visualization
+                # Standard PDB line for visualization
                 std_line = line[:66].ljust(66) + "\n"
                 cleaned_pdb_lines.append(std_line)
 
-                # 2. Fix PDBQT atom types (extract base atom type from columns 70-79 if needed)
-                # AutoDock atom types are usually found at the end of the line. 
-                # We strip invalid suffixes like '+', '-', digits from the atom type field.
-                parts = line.rstrip().split()
-                if len(parts) >= 8:
-                    atom_type = parts[-1]
-                    # Clean common invalid suffixes causing AutoDock parse errors
-                    if any(char in atom_type for char in ["+", "-"]) or any(char.isdigit() for char in atom_type):
-                        # Fallback to standard element symbol from atom name (cols 12-16)
-                        element_symbol = line[12:16].strip()
-                        for char in element_symbol:
-                            if char.isalpha():
-                                clean_type = char.upper()
-                                break
-                        else:
-                            clean_type = "A"
-                        
-                        # Reconstruct line with clean atom type
-                        base_line = line[:70].ljust(70)
-                        fixed_pdbqt_line = f"{base_line} {clean_type}  0.00\n"
-                        pdbqt_lines.append(fixed_pdbqt_line)
-                    else:
-                        pdbqt_lines.append(line if line.endswith("\n") else line + "\n")
-                else:
-                    # If columns are missing, append default formatted line
+                # Extract element symbol to map to valid AutoDock atom types
+                element = ""
+                if len(line) >= 78:
+                    element = line[76:78].strip().upper()
+                
+                if not element or not element.isalpha():
                     atom_name = line[12:16].strip()
-                    elem = ''.join([c for c in atom_name if c.isalpha()]).upper()[:1]
-                    if not elem: elem = "A"
-                    base_line = line[:70].ljust(70)
-                    pdbqt_lines.append(f"{base_line} {elem}  0.00\n")
+                    element = ''.join([c for c in atom_name if c.isalpha()]).upper()[:1]
+
+                # Map to standard AutoDock atom types (including HD for polar hydrogens)
+                if element == 'C':
+                    ad_type = 'A'
+                elif element == 'N':
+                    ad_type = 'N'
+                elif element == 'O':
+                    ad_type = 'OA'
+                elif element == 'S':
+                    ad_type = 'SA'
+                elif element == 'P':
+                    ad_type = 'P'
+                elif element == 'H':
+                    # Polar hydrogens are assigned 'HD' in AutoDock, others 'H'
+                    atom_name = line[12:16].strip()
+                    ad_type = 'HD' if atom_name.startswith('H') else 'H'
+                else:
+                    ad_type = element if len(element) == 1 else 'A'
+
+                # Construct clean PDBQT line with valid atom type and neutral charge
+                clean_prefix = line[:70].ljust(70)
+                strict_pdbqt_line = f"{clean_prefix} {ad_type:<2}  0.00\n"
+                pdbqt_lines.append(strict_pdbqt_line)
 
             elif line.startswith(("TER", "HEADER", "REMARK", "MODEL", "ENDMDL")):
                 cleaned_pdb_lines.append(line if line.endswith("\n") else line + "\n")
@@ -116,6 +128,7 @@ def clean_and_prepare_receptor(target_file_path, output_pdb_path, output_pdbqt_p
     except Exception as e:
         print(f"[ERROR] Receptor cleaning failed: {e}")
         return False
+        
 # ── Ligand SDF loading (FIXED Return Type) ───────────────────────────────────
 def load_ligands_from_bytes(
     sdf_bytes: bytes,
