@@ -41,7 +41,7 @@ def clean_and_prepare_receptor(target_file_path, output_pdb_path):
             # Skip water molecules
             if any(wat in line for wat in ["HOH", "WAT"]):
                 continue
-            
+
             # Skip heteroatoms
             if line.startswith("HETATM"):
                 continue
@@ -168,6 +168,14 @@ def convert_ligand_pose_to_pdb(sdf_path, pdb_path):
 
 
 def create_protein_ligand_complex(receptor_path, ligand_pdb_path, output_complex_path):
+    """
+    Merges the clean receptor PDB and ligand PDB into a single PDB complex.
+
+    Fix: ligand atom serials are renumbered to continue after the receptor's
+    highest serial (no collisions), and CONECT records are preserved/remapped
+    so the ligand's real bonds survive into the merged complex instead of
+    being re-guessed by distance-based bond perception.
+    """
     receptor_lines = []
     max_serial = 0
     with open(receptor_path, 'r', encoding="utf-8", errors="ignore") as f:
@@ -386,7 +394,7 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
 
         status_log += "\n[1/3] Parsing & Cleaning Target Protein..."
         temp_dir = tempfile.mkdtemp()
-        
+
         clean_target_pdb_path = os.path.join(temp_dir, "clean_receptor.pdb")
         clean_and_prepare_receptor(target_file.name, clean_target_pdb_path)
 
@@ -444,8 +452,8 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
 
                     # Step 2: Create Perfect Protein-Ligand Complex PDB
                     create_protein_ligand_complex(
-                        clean_target_pdb_path, 
-                        top_pose_pdb, 
+                        clean_target_pdb_path,
+                        top_pose_pdb,
                         complex_pdb
                     )
 
