@@ -41,7 +41,7 @@ def clean_and_prepare_receptor(target_file_path, output_pdb_path):
             # Skip water molecules
             if any(wat in line for wat in ["HOH", "WAT"]):
                 continue
-
+            
             # Skip heteroatoms
             if line.startswith("HETATM"):
                 continue
@@ -169,72 +169,30 @@ def convert_ligand_pose_to_pdb(sdf_path, pdb_path):
 
 def create_protein_ligand_complex(receptor_path, ligand_pdb_path, output_complex_path):
     """
-    Merges the clean receptor PDB and ligand PDB into a single PDB complex.
-
-    Fix: ligand atom serials are renumbered to continue after the receptor's
-    highest serial (no collisions), and CONECT records are preserved/remapped
-    so the ligand's real bonds survive into the merged complex instead of
-    being re-guessed by distance-based bond perception.
+    Merges the clean receptor PDB and ligand PDB into a single PDB complex 
+    for flawless visualization in Discovery Studio or PyMOL.
     """
     receptor_lines = []
-    max_serial = 0
     with open(receptor_path, 'r', encoding="utf-8", errors="ignore") as f:
         for line in f:
             if line.startswith(("ATOM", "HETATM")):
-                receptor_lines.append(line if line.endswith("\n") else line + "\n")
-                try:
-                    max_serial = max(max_serial, int(line[6:11]))
-                except ValueError:
-                    pass
+                receptor_lines.append(line[:66].ljust(66) + "\n")
             elif line.startswith(("TER", "REMARK")):
                 receptor_lines.append(line if line.endswith("\n") else line + "\n")
 
-    # Force the ligand onto its own chain + residue number that cannot
-    # collide with anything in the receptor. Without this, Discovery
-    # Studio's residue-based bond perception can mis-group/mis-bond the
-    # ligand's atoms against a receptor residue that happens to share the
-    # same chain ID + residue number, which distorts the visualized ligand.
-    LIGAND_CHAIN_ID = "X"
-    LIGAND_RES_SEQ = 999
-
-    ligand_atom_lines, conect_lines, serial_map = [], [], {}
-    next_serial = max_serial + 1
-
+    ligand_lines = []
     if os.path.exists(ligand_pdb_path):
         with open(ligand_pdb_path, 'r', encoding="utf-8", errors="ignore") as f:
             for line in f:
                 if line.startswith(("ATOM", "HETATM")):
-                    old_serial = int(line[6:11])
-                    serial_map[old_serial] = next_serial
-                    new_line = (
-                        "HETATM"
-                        + f"{next_serial:>5}"
-                        + line[11:21]                 # atom name, altLoc, resName
-                        + LIGAND_CHAIN_ID
-                        + f"{LIGAND_RES_SEQ:>4}"
-                        + line[26:]                   # iCode, coords, occ, tempFactor, element, charge
-                    )
-                    ligand_atom_lines.append(new_line if new_line.endswith("\n") else new_line + "\n")
-                    next_serial += 1
-                elif line.startswith("CONECT"):
-                    conect_lines.append(line)
-
-    remapped_conect = []
-    for line in conect_lines:
-        ids = line.split()[1:]
-        try:
-            new_ids = [serial_map[int(i)] for i in ids if int(i) in serial_map]
-            if new_ids:
-                remapped_conect.append("CONECT" + "".join(f"{i:5d}" for i in new_ids) + "\n")
-        except ValueError:
-            continue
+                    ligand_lines.append(line[:66].ljust(66) + "\n")
 
     with open(output_complex_path, 'w', encoding="utf-8") as out_f:
         out_f.writelines(receptor_lines)
         out_f.write("TER\n")
-        out_f.writelines(ligand_atom_lines)
-        out_f.writelines(remapped_conect)
+        out_f.writelines(ligand_lines)
         out_f.write("END\n")
+
     return os.path.exists(output_complex_path)
 
 
@@ -409,7 +367,7 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
 
         status_log += "\n[1/3] Parsing & Cleaning Target Protein..."
         temp_dir = tempfile.mkdtemp()
-
+        
         clean_target_pdb_path = os.path.join(temp_dir, "clean_receptor.pdb")
         clean_and_prepare_receptor(target_file.name, clean_target_pdb_path)
 
@@ -467,8 +425,8 @@ def run_deepdock_pipeline(ligand_file, filter_type, target_file, custom_cx, cust
 
                     # Step 2: Create Perfect Protein-Ligand Complex PDB
                     create_protein_ligand_complex(
-                        clean_target_pdb_path,
-                        top_pose_pdb,
+                        clean_target_pdb_path, 
+                        top_pose_pdb, 
                         complex_pdb
                     )
 
