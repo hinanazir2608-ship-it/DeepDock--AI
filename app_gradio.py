@@ -183,33 +183,28 @@ def convert_ligand_pose_to_pdb(sdf_path, pdb_path):
 
 def create_protein_ligand_complex(receptor_path, ligand_pdb_path, output_complex_path):
     """
-    Merges the clean receptor PDB and ligand PDB into a single PDB complex 
-    for flawless visualization in Discovery Studio or PyMOL.
+    Combines PDB files and forces a clean merge so they are centered together 
+    in Discovery Studio without floating or offset issues.
     """
-    receptor_lines = []
-    with open(receptor_path, 'r', encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            if line.startswith(("ATOM", "HETATM")):
-                receptor_lines.append(line[:66].ljust(66) + "\n")
-            elif line.startswith(("TER", "REMARK")):
-                receptor_lines.append(line if line.endswith("\n") else line + "\n")
-
-    ligand_lines = []
-    if os.path.exists(ligand_pdb_path):
-        with open(ligand_pdb_path, 'r', encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                if line.startswith(("ATOM", "HETATM")):
-                    ligand_lines.append(line[:66].ljust(66) + "\n")
-
-    with open(output_complex_path, 'w', encoding="utf-8") as out_f:
-        out_f.writelines(receptor_lines)
-        out_f.write("TER\n")
-        out_f.writelines(ligand_lines)
-        out_f.write("END\n")
-
+    # Simply reading and writing them together
+    with open(receptor_path, 'r') as f_rec, open(ligand_pdb_path, 'r') as f_lig:
+        rec_data = f_rec.read()
+        lig_data = f_lig.read()
+    
+    with open(output_complex_path, 'w') as f_out:
+        # Write protein
+        f_out.write(rec_data.replace("END", "").strip() + "\n")
+        # Write separator
+        f_out.write("TER\n")
+        # Write ligand as HETATM
+        for line in lig_data.splitlines():
+            if line.startswith("ATOM"):
+                f_out.write("HETATM" + line[6:] + "\n")
+            elif line.startswith("HETATM"):
+                f_out.write(line + "\n")
+        f_out.write("END\n")
+        
     return os.path.exists(output_complex_path)
-
-
 def process_ligands(ligand_file_path, filter_type):
     """
     RDKit-based ligand loading and Lipinski Rule of 5 filtering.
