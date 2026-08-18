@@ -4,33 +4,78 @@ import tempfile
 import pandas as pd
 from rdkit import Chem
 
-def pdbqt_to_pdb_standard(pdbqt_file: str, output_pdb_path: str = None) -> str:
+# AutoDock/Vina PDBQT atom types aren't real element symbols — map them back.
+AD_TYPE_TO_ELEMENT = {
+    "H": "H", "HD": "H", "HS": "H",
+    "C": "C", "A": "C",              # A = aromatic carbon
+    "N": "N", "NA": "N", "NS": "N",
+    "O": "O", "OA": "O", "OS": "O",
+    "S": "S", "SA": "S",
+    "P": "P", "F": "F",
+    "Cl": "Cl", "CL": "Cl",
+    "Br": "Br", "BR": "Br",
+    "I": "I",
+    "Mg": "Mg", "MG": "Mg", "Ca": "Ca", "CA": "Ca",
+    "Mn": "Mn", "MN": "Mn", "Fe": "Fe", "FE": "Fe",
+    "Zn": "Zn", "ZN": "Zn", "Cu": "Cu", "CU": "Cu",
+    "Na": "Na", "K": "K",
+}
+
+def _guess_element(line: str) -> str:
+    """Real element for a PDBQT atom line: try the AutoDock type (last
+    whitespace token), fall back to the atom name if unmapped."""
+    tokens = line.split()
+    ad_type = tokens[-1] if tokens else ""
+    if ad_type in AD_TYPE_TO_ELEMENT:
+        return AD_TYPE_TO_ELEMENT[ad_type]
+    name = line[12:16].strip()
+    if len(name) >= 2 and name[:2].capitalize() in ("Cl", "Br", "Zn", "Fe", "Mg", "Mn", "Ca", "Na"):
+        return name[:2].capitalize()
+    for ch in name:
+        if ch.isalpha():
+            return ch.upper()
+    return " "
+
+
+def pdbqt_to_pdb_standard(pdbqt_file: str, output_pdb_path: str = None, start_serial: int = 1) -> tuple:
     """
-    Converts a PDBQT docking output or target file into standard PDB format by stripping 
-    AutoDock charge and atom-type columns, and ensuring proper formatting for downstream 
-    visualizers like Discovery Studio.
+    Converts a PDBQT (receptor or docked ligand) into standard PDB format.
+
+    Fixes:
+    - Writes the REAL element symbol (cols 77-78), mapped from the AutoDock
+      atom type, instead of silently dropping it.
+    - Renumbers atom serials starting at `start_serial`, so receptor + ligand
+      can be concatenated with zero collisions.
+
+    Returns (output_pdb_path, next_free_serial) — chain receptor then ligand:
+        receptor_pdb, next_serial = pdbqt_to_pdb_standard(receptor_pdbqt, start_serial=1)
+        ligand_pdb, _ = pdbqt_to_pdb_standard(ligand_pdbqt, start_serial=next_serial)
     """
     if not os.path.exists(pdbqt_file):
         raise FileNotFoundError(f"PDBQT file not found: {pdbqt_file}")
-
     if output_pdb_path is None:
         output_pdb_path = pdbqt_file.replace(".pdbqt", ".pdb")
 
     pdb_lines = []
+    serial = start_serial
+
     with open(pdbqt_file, "r") as f:
         for line in f:
             if line.startswith(("ATOM", "HETATM")):
-                # Retain standard PDB columns (1 to 66 characters) to remove AutoDock charges/types
-                standard_line = line[:66].ljust(66) + "\n"
+                element = _guess_element(line)
+                base = line[:66].ljust(66)
+                renumbered = base[:6] + f"{serial:>5}" + base[11:]   # swap serial only
+                standard_line = renumbered + " " * 10 + f"{element:>2}" + "  " + "\n"
                 pdb_lines.append(standard_line)
-            elif line.startswith(("MODEL", "ENDMDL", "TER", "HEADER", "TITLE", "COMPND", "SOURCE", "KEYWDS", "EXPDTA", "AUTHOR", "REMARK")):
+                serial += 1
+            elif line.startswith(("MODEL", "ENDMDL", "TER", "HEADER", "TITLE", "COMPND",
+                                   "SOURCE", "KEYWDS", "EXPDTA", "AUTHOR", "REMARK")):
                 pdb_lines.append(line)
 
     with open(output_pdb_path, "w") as f:
         f.writelines(pdb_lines)
 
-    return output_pdb_path
-
+    return output_pdb_path, serial  # `serial` is now the next free number
 
 def create_results_zip(zip_output_path: str, csv_path: str, docked_mols: list = None, mol_names: list = None) -> str:
     """
