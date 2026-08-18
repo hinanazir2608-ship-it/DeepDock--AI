@@ -168,31 +168,50 @@ def convert_ligand_pose_to_pdb(sdf_path, pdb_path):
 
 
 def create_protein_ligand_complex(receptor_path, ligand_pdb_path, output_complex_path):
-    """
-    Merges the clean receptor PDB and ligand PDB into a single PDB complex 
-    for flawless visualization in Discovery Studio or PyMOL.
-    """
     receptor_lines = []
+    max_serial = 0
     with open(receptor_path, 'r', encoding="utf-8", errors="ignore") as f:
         for line in f:
             if line.startswith(("ATOM", "HETATM")):
-                receptor_lines.append(line[:66].ljust(66) + "\n")
+                receptor_lines.append(line if line.endswith("\n") else line + "\n")
+                try:
+                    max_serial = max(max_serial, int(line[6:11]))
+                except ValueError:
+                    pass
             elif line.startswith(("TER", "REMARK")):
                 receptor_lines.append(line if line.endswith("\n") else line + "\n")
 
-    ligand_lines = []
+    ligand_atom_lines, conect_lines, serial_map = [], [], {}
+    next_serial = max_serial + 1
+
     if os.path.exists(ligand_pdb_path):
         with open(ligand_pdb_path, 'r', encoding="utf-8", errors="ignore") as f:
             for line in f:
                 if line.startswith(("ATOM", "HETATM")):
-                    ligand_lines.append(line[:66].ljust(66) + "\n")
+                    old_serial = int(line[6:11])
+                    serial_map[old_serial] = next_serial
+                    new_line = line[:6] + f"{next_serial:5d}" + line[11:]
+                    ligand_atom_lines.append(new_line if new_line.endswith("\n") else new_line + "\n")
+                    next_serial += 1
+                elif line.startswith("CONECT"):
+                    conect_lines.append(line)
+
+    remapped_conect = []
+    for line in conect_lines:
+        ids = line.split()[1:]
+        try:
+            new_ids = [serial_map[int(i)] for i in ids if int(i) in serial_map]
+            if new_ids:
+                remapped_conect.append("CONECT" + "".join(f"{i:5d}" for i in new_ids) + "\n")
+        except ValueError:
+            continue
 
     with open(output_complex_path, 'w', encoding="utf-8") as out_f:
         out_f.writelines(receptor_lines)
         out_f.write("TER\n")
-        out_f.writelines(ligand_lines)
+        out_f.writelines(ligand_atom_lines)
+        out_f.writelines(remapped_conect)
         out_f.write("END\n")
-
     return os.path.exists(output_complex_path)
 
 
