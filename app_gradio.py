@@ -151,21 +151,26 @@ def extract_top_ligand_pose(gnina_output_path, top_pose_path):
 
 def convert_ligand_pose_to_pdb(sdf_path, pdb_path):
     """
-    Converts docked SDF pose to a real PDB so it contains ATOM/HETATM records.
+    Directly converts the docked SDF pose (with exact GNINA 3D coordinates) 
+    into standard PDB format using RDKit BlockWriter to preserve exact docking orientation.
     """
     if not os.path.exists(sdf_path):
         return False
     try:
-        supplier = Chem.SDMolSupplier(sdf_path)
+        supplier = Chem.SDMolSupplier(sdf_path, removeHs=False)
         mol = next((m for m in supplier if m is not None), None)
         if mol is None:
             return False
-        Chem.MolToPDBFile(mol, pdb_path)
+        
+        # Use MolToPDBBlock and write manually to ensure exact 3D coordinates from GNINA output
+        pdb_block = Chem.MolToPDBBlock(mol)
+        with open(pdb_path, "w", encoding="utf-8") as f:
+            f.write(pdb_block)
+            
         return os.path.exists(pdb_path)
     except Exception as e:
-        print(f"Ligand SDF->PDB conversion error: {e}")
+        print(f"Ligand SDF->PDB coordinate conversion error: {e}")
         return False
-
 
 def create_protein_ligand_complex(receptor_path, ligand_pdb_path, output_complex_path):
     """
