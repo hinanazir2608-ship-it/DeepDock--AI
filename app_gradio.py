@@ -151,19 +151,28 @@ def extract_top_ligand_pose(gnina_output_path, top_pose_path):
 
 def convert_ligand_pose_to_pdb(sdf_path, pdb_path):
     """
-    Directly converts the docked SDF pose (with exact GNINA 3D coordinates) 
-    into standard PDB format using RDKit BlockWriter to preserve exact docking orientation.
+    Converts docked ligand SDF to PDB while strictly preserving exact 3D coordinates,
+    explicit hydrogens, and atom order without any conformational twisting.
     """
     if not os.path.exists(sdf_path):
         return False
     try:
-        supplier = Chem.SDMolSupplier(sdf_path, removeHs=False)
+        # Load molecule keeping all explicit hydrogens intact
+        supplier = Chem.SDMolSupplier(sdf_path, removeHs=False, sanitize=False)
         mol = next((m for m in supplier if m is not None), None)
+        
         if mol is None:
             return False
+            
+        # Sanitize safely without altering coordinates
+        try:
+            Chem.SanitizeMol(mol, sanitizeOps=Chem.SanitizeFlags.SANITIZE_ALL^Chem.SanitizeFlags.SANITIZE_KEKULIZE)
+        except Exception:
+            pass
+
+        # Write PDB block ensuring explicit 3D conformations are locked
+        pdb_block = Chem.MolToPDBBlock(mol, confId=0, flavor=0)
         
-        # Use MolToPDBBlock and write manually to ensure exact 3D coordinates from GNINA output
-        pdb_block = Chem.MolToPDBBlock(mol)
         with open(pdb_path, "w", encoding="utf-8") as f:
             f.write(pdb_block)
             
