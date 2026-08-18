@@ -189,20 +189,28 @@ def create_protein_ligand_complex(receptor_path, ligand_pdb_path, output_complex
             elif line.startswith(("TER", "REMARK")):
                 receptor_lines.append(line if line.endswith("\n") else line + "\n")
 
-    ligand_atom_lines, conect_lines, serial_map = [], [], {}
-    next_serial = max_serial + 1
+    LIGAND_CHAIN_ID = "X"      # koi bhi letter jo receptor chains mein na ho
+    LIGAND_RES_SEQ  = 999      # koi bhi number jo receptor residues se bara/alag ho
 
-    if os.path.exists(ligand_pdb_path):
-        with open(ligand_pdb_path, 'r', encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                if line.startswith(("ATOM", "HETATM")):
-                    old_serial = int(line[6:11])
-                    serial_map[old_serial] = next_serial
-                    new_line = line[:6] + f"{next_serial:5d}" + line[11:]
-                    ligand_atom_lines.append(new_line if new_line.endswith("\n") else new_line + "\n")
-                    next_serial += 1
-                elif line.startswith("CONECT"):
-                    conect_lines.append(line)
+if os.path.exists(ligand_pdb_path):
+    with open(ligand_pdb_path, 'r', encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            if line.startswith(("ATOM", "HETATM")):
+                old_serial = int(line[6:11])
+                serial_map[old_serial] = next_serial
+                # record type + serial + (name/altLoc/resName unchanged) + FORCED chain+resSeq
+                new_line = (
+                    "HETATM"
+                    + f"{next_serial:>5}"
+                    + line[11:21]                      # atom name, altLoc, resName
+                    + LIGAND_CHAIN_ID
+                    + f"{LIGAND_RES_SEQ:>4}"
+                    + line[26:]                        # iCode, coords, occ, tempFactor, element, charge
+                )
+                ligand_atom_lines.append(new_line if new_line.endswith("\n") else new_line + "\n")
+                next_serial += 1
+            elif line.startswith("CONECT"):
+                conect_lines.append(line)
 
     remapped_conect = []
     for line in conect_lines:
