@@ -7,7 +7,7 @@ Reference: Gui C. et al. Nucleic Acids Research 2024 (ADMETlab 3.0)
 from __future__ import annotations
 import time
 import math
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 import requests
 import pandas as pd
