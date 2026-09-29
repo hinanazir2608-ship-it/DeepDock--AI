@@ -1,6 +1,6 @@
 RDKit
 pandas
-NumPy
+numpy
 Gradio
 Streamlit
 Gemmi
