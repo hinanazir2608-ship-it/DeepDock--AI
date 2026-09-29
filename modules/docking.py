@@ -48,7 +48,7 @@ def mol_to_pdbqt(mol, output_pdbqt_path):
         mol = Chem.AddHs(mol)
         if not mol.GetNumConformers():
             params = AllChem.ETKDGv3()
-            params.randomSeed = 42
+            params.randomSeed = RDKIT_EMBED_SEED
             if AllChem.EmbedMolecule(mol, params) == -1:
                 return False, "RDKit 3D embedding failed."
             AllChem.MMFFOptimizeMolecule(mol)
