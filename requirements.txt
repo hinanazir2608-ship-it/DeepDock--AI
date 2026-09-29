@@ -1,0 +1,16 @@
+RDKit
+pandas
+NumPy
+Gradio
+Streamlit
+Gemmi
+Meeko
+Vina
+PyTorch
+SciPy
+Matplotlib
+Seaborn
+Requests
+Pillow
+OpenBabel
+GNINA
