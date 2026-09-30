@@ -861,53 +861,57 @@ def detect_gpu():
 # ADMET
 # ============================================================
 
-def run_admet_for_successful_ligands(successful_mols, successful_names, score_map):
+def run_admet_for_successful_ligands(
+    successful_mols,
+    successful_names,
+    score_map,
+    status_log=None,
+):
     """
     Run ADMET only for successfully docked ligands.
 
-    The function keeps the existing admetlab.py interface assumption:
-        run_admet_analysis(mols, names, scores)
+    This wrapper matches the current admetlab.py interface exactly:
+        run_admet_analysis(mols, names, scores, cids=None,
+                           use_api=True, status_text=None)
 
-    If your admetlab.py uses a different signature, only this small
-    wrapper needs to be adjusted.
+    admetlab.py itself handles the fallback:
+        ADMETlab 3.0 -> RDKit descriptors if the API is unavailable.
+
+    Returns (DataFrame, source) so the Gradio pipeline can report whether
+    ADMETlab 3.0 or the RDKit fallback was used.
     """
     if not successful_mols:
-        return pd.DataFrame()
+        return pd.DataFrame(), "None"
+
+    scores = []
+    for name in successful_names:
+        value = score_map.get(name)
+        try:
+            scores.append(float(value))
+        except (TypeError, ValueError):
+            scores.append(float("nan"))
 
     try:
-        return run_admet_analysis(
+        admet_df, admet_source = run_admet_analysis(
             successful_mols,
             successful_names,
-            score_map,
+            scores,
+            cids=None,
+            use_api=True,
+            status_text=None,
         )
-    except TypeError:
-        # Compatibility fallback for a common dataframe-based interface.
-        rows = []
 
-        for name, mol in zip(successful_names, successful_mols):
-            rows.append({
-                "Name": name,
-                "SMILES": Chem.MolToSmiles(Chem.RemoveHs(mol)),
-                "CNN Score": score_map.get(name),
-            })
+        if admet_df is None:
+            return pd.DataFrame(), admet_source
 
-        admet_input = pd.DataFrame(rows)
-
-        try:
-            return run_admet_analysis(admet_input)
-        except Exception as exc:
-            return pd.DataFrame({
-                "ADMET Status": [
-                    f"ADMET execution failed: {exc}"
-                ]
-            })
+        return admet_df, admet_source
 
     except Exception as exc:
+        # Do not retry run_admet_analysis with the wrong signature.
+        # The module already contains its own ADMETlab -> RDKit fallback.
         return pd.DataFrame({
-            "ADMET Status": [
-                f"ADMET execution failed: {exc}"
-            ]
-        })
+            "ADMET Status": [f"ADMET execution failed: {exc}"]
+        }), "Error"
 
 
 # ============================================================
@@ -1242,7 +1246,7 @@ def docking_pipeline(
 
         status_log += "\n\n🧬 Running ADMET only on successfully docked ligands..."
 
-        admet_df = run_admet_for_successful_ligands(
+        admet_df, admet_source = run_admet_for_successful_ligands(
             successful_mols,
             successful_names,
             score_map,
@@ -1251,6 +1255,7 @@ def docking_pipeline(
         status_log += (
             f"\n   ✓ Successful docking ligands sent to ADMET: "
             f"{len(successful_mols)}"
+            f"\n   ✓ ADMET engine: {admet_source}"
         )
 
         # ----------------------------------------------------
