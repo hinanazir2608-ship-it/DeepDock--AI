@@ -40,6 +40,10 @@ GNINA_EXHAUSTIVENESS = 8
 GNINA_CPU = 4
 GNINA_TIMEOUT = 1800
 
+# Explicit GNINA GPU device. GNINA defaults to device 0; keeping this
+# explicit makes GPU selection deterministic when multiple NVIDIA GPUs exist.
+GNINA_GPU_DEVICE = 0
+
 # Automatically use GPU when an NVIDIA GPU is available.
 # If False, --no_gpu is passed to GNINA and CPU is used.
 FORCE_CPU = False
@@ -427,7 +431,9 @@ def run_gnina_docking(
         "--cpu", str(GNINA_CPU),
     ]
 
-    if not use_gpu:
+    if use_gpu:
+        cmd.extend(["--device", str(GNINA_GPU_DEVICE)])
+    else:
         cmd.append("--no_gpu")
 
     try:
@@ -741,6 +747,8 @@ def run_batched_docking(
     print(f"GNINA: {gnina_path}")
     print(f"GNINA version: {gnina_version}")
     print(f"Hardware: {hardware}")
+    if use_gpu:
+        print(f"GPU device: {GNINA_GPU_DEVICE}")
     print(f"GNINA seed: {GNINA_SEED}")
     print(f"CPU threads: {GNINA_CPU}")
     print(f"Exhaustiveness: {GNINA_EXHAUSTIVENESS}")
