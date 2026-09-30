@@ -1127,5 +1127,5 @@ with gr.Blocks(title="DeepDock-AI — GNINA Rigid Docking") as demo:
 
 
 if __name__ == "__main__":
-    # share=False: no public tunnel.
+     share=True: no public tunnel.
     demo.launch(share=False, show_error=True)
