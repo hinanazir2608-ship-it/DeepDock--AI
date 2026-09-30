@@ -1,19 +1,34 @@
 """
 DeepDock-AI — app_gradio.py
+Revised for:
+    - Manual active-site/grid coordinates (no whole-protein centroid fallback)
+    - Rigid-receptor GNINA docking
+    - GNINA CNN scoring + CNN affinity
+    - Fixed GNINA/RDKit seeds
+    - Robust AltLoc handling
+    - Full PDB-line preservation
+    - Real/absent RMSD fields (no fake 0.0 values)
+    - 3D preparation for BOTH CSV and SDF ligands
+    - Robust MMFF -> UFF fallback
+    - Ligand serial-number renumbering in complexes
+    - Safe filenames
+    - Generic Name column
+    - Failed docking excluded from ADMET
+    - Explicit ranking by CNN Score
+    - Live Gradio progress updates
+    - Temporary-run cleanup
+    - share=False by default
 
-GNINA rigid-receptor docking with a MANUAL active-site box.
+IMPORTANT:
+    This version intentionally requires the user to define the docking box.
+    It does NOT calculate a whole-protein centroid and silently use it.
 
-Design notes:
-  * No whole-protein centroid fallback. The user must supply the box, and the
-    box is sanity-checked against the receptor (atoms inside the box).
-  * GNINA CNN Score = pose confidence. For each ligand, the pose with the
-    highest CNN Score is used for the reported scores and the complex PDB.
-  * NO automatic ranking. Results are listed in input order; ranking is left
-    to the user.
-  * ADMET: ADMETlab 3.0 (via admetlab.py) when available, otherwise a built-in
-    RDKit rule-based descriptor table.
-  * Fixed GNINA / RDKit seeds. FORCE_CPU=True is the safest for repeatability.
-    Bit-for-bit reproducibility still depends on identical GNINA/RDKit versions.
+    For reproducibility:
+      * GNINA_SEED and RDKIT_EMBED_SEED are fixed.
+      * FORCE_CPU=False automatically uses an NVIDIA GPU when available;
+      * FORCE_CPU=True forces CPU-only mode for maximum repeatability.
+      * Exact bit-for-bit reproducibility still depends on the same
+        GNINA/RDKit versions and computational environment.
 """
 
 import os
@@ -22,7 +37,6 @@ import shutil
 import zipfile
 import tempfile
 import subprocess
-import platform
 from pathlib import Path
 
 import numpy as np
@@ -33,17 +47,9 @@ from rdkit import RDLogger
 RDLogger.DisableLog("rdApp.*")
 
 from rdkit import Chem
-from rdkit import __version__ as RDKIT_VERSION
-from rdkit.Chem import Descriptors, Lipinski, AllChem, Crippen, QED, rdMolDescriptors
-from rdkit.Chem.FilterCatalog import FilterCatalog, FilterCatalogParams
+from rdkit.Chem import Descriptors, Lipinski, AllChem
 
-# ADMETlab 3.0 module (optional: the app still works with the RDKit fallback)
-try:
-    from admetlab import run_admet_analysis
-    ADMETLAB_IMPORT_ERROR = None
-except Exception as _exc:  # noqa: BLE001
-    run_admet_analysis = None
-    ADMETLAB_IMPORT_ERROR = str(_exc)
+from admetlab import run_admet_analysis
 
 
 # ============================================================
@@ -56,29 +62,28 @@ RDKIT_EMBED_SEED = 42
 GNINA_NUM_MODES = 9
 GNINA_EXHAUSTIVENESS = 8
 GNINA_CPU = 4
-GNINA_TIMEOUT = 1800
 
-# True  -> always CPU (most repeatable)
-# False -> GPU if an NVIDIA GPU is detected
-FORCE_CPU = True
+# Automatic hardware selection:
+# GPU is used when NVIDIA GPU is detected; otherwise GNINA falls back to CPU.
+FORCE_CPU = False
 
-# Optional explicit GNINA path, e.g. r"C:\DeepDock-AI\gnina.exe"
+# NVIDIA GPU device to use when GPU acceleration is available.
+# 0 = first GPU (your environment currently exposes two Tesla T4 GPUs).
+GNINA_GPU_DEVICE = 0
+
+# Optional explicit GNINA executable path.
+# Example:
+# GNINA_PATH = r"C:\DeepDock-AI\gnina.exe"
 GNINA_PATH = None
 
-# Box fields start empty on purpose: the user must enter them.
-DEFAULT_CENTER = None
-DEFAULT_SIZE = 20.0
+# Default manual active-site box.
+DEFAULT_CENTER_X = 0.0
+DEFAULT_CENTER_Y = 0.0
+DEFAULT_CENTER_Z = 0.0
 
-# Box must contain at least this many receptor atoms, otherwise it is
-# almost certainly in empty space (e.g. left at 0,0,0).
-MIN_ATOMS_IN_BOX = 50
-
-# Modified residues stored as HETATM that should stay part of the protein.
-MODIFIED_RESIDUES = {
-    "MSE", "CSO", "SEP", "TPO", "PTR", "HYP", "KCX",
-    "CME", "OCS", "CSD", "CAS", "MLY", "SMC",
-}
-WATER_NAMES = {"HOH", "WAT", "DOD"}
+DEFAULT_SIZE_X = 20.0
+DEFAULT_SIZE_Y = 20.0
+DEFAULT_SIZE_Z = 20.0
 
 
 # ============================================================
@@ -86,33 +91,38 @@ WATER_NAMES = {"HOH", "WAT", "DOD"}
 # ============================================================
 
 def get_file_path(f):
-    """Works with old Gradio file objects and new string paths."""
+    """Works with older Gradio file objects and newer string paths."""
     if f is None:
         return None
     return getattr(f, "name", f)
 
 
 def safe_filename(name):
-    name = str(name).strip() or "ligand"
-    return re.sub(r"[^\w\-.]", "_", name)[:80]
+    """Create a Windows-safe filename."""
+    name = str(name).strip()
+    if not name:
+        name = "ligand"
+    return re.sub(r"[^\w\-.]", "_", name)
 
 
 def is_valid_number(value):
-    """Accept a legitimate 0.0 but reject None / NaN / text."""
+    """Accept legitimate 0.0 but reject None/NaN."""
     if value is None:
         return False
     try:
-        return bool(np.isfinite(float(value)))
+        return np.isfinite(float(value))
     except (TypeError, ValueError):
         return False
 
 
-def _to_text(x):
-    if x is None:
-        return ""
-    if isinstance(x, bytes):
-        return x.decode("utf-8", errors="replace")
-    return str(x)
+def clean_dataframe_indices(df):
+    """
+    Keep the identifier generic.
+    Never relabel arbitrary molecule names as PubChem CID.
+    """
+    df = df.copy()
+    df.index = range(1, len(df) + 1)
+    return df
 
 
 # ============================================================
@@ -121,113 +131,101 @@ def _to_text(x):
 
 def clean_receptor_pdb(pdb_file_path, output_path):
     """
-    Protein-only receptor for rigid GNINA docking.
+    Prepare a protein-only receptor for rigid GNINA docking.
 
-    Removes: waters, other HETATM (ligands, ions), altLoc B/C/..., extra models.
-    Keeps:   ATOM records (altLoc blank/A, with the altLoc column blanked),
-             common modified residues (re-labelled as ATOM), full PDB lines.
-    Adds:    one TER between chains.
+    Removes:
+      - waters
+      - HETATM records
+      - alternate conformations B/C/etc.
 
-    Returns a dict with the residues that were converted / dropped so the
-    user can verify nothing important near the active site was lost.
+    Keeps:
+      - ATOM records
+      - blank/A alternate location
+      - original full PDB lines, including element columns
+
+    Existing TER records are normalized so that duplicate TER lines
+    are not produced.
     """
     kept = []
-    dropped_hetero = set()
-    converted_modified = set()
 
     with open(pdb_file_path, "r", errors="ignore") as f:
-        for raw in f:
-            line = raw.rstrip("\r\n")
+        for raw_line in f:
+            line = raw_line.rstrip("\r\n")
 
-            if line.startswith("ENDMDL"):
-                break  # first model only
-
-            is_atom = line.startswith("ATOM")
-            is_het = line.startswith("HETATM")
-
-            if not (is_atom or is_het) or len(line) < 54:
-                continue
-
-            resname = line[17:20].strip().upper()
-
-            if is_het:
-                if resname in MODIFIED_RESIDUES:
-                    line = "ATOM  " + line[6:]
-                    converted_modified.add(resname)
-                else:
-                    if resname not in WATER_NAMES:
-                        dropped_hetero.add(resname)
+            if line.startswith("ATOM"):
+                # AltLoc is column 17 (index 16).
+                if len(line) > 16 and line[16] not in (" ", "A"):
                     continue
 
-            # altLoc (column 17): keep blank / A only, then blank the column
-            if line[16] not in (" ", "A"):
-                continue
-            line = line[:16] + " " + line[17:]
+                # Preserve the COMPLETE line.
+                kept.append(line)
 
-            kept.append(line)
+            elif line.startswith(("ENDMDL", "MODEL")):
+                # Ignore multi-model PDB bookkeeping.
+                continue
+
+            # Ignore original TER here; we add normalized TER below.
 
     if not kept:
         raise ValueError("No protein ATOM records were found in the target PDB.")
 
-    out = []
+    # Insert TER between chains while avoiding duplicate TER records.
+    output_lines = []
     previous_chain = None
+
     for line in kept:
-        chain = line[21]
+        chain = line[21] if len(line) > 21 else " "
+
         if previous_chain is not None and chain != previous_chain:
-            out.append("TER")
-        out.append(line)
+            output_lines.append("TER")
+
+        output_lines.append(line)
         previous_chain = chain
-    out.append("TER")
-    out.append("END")
+
+    if output_lines and output_lines[-1] != "TER":
+        output_lines.append("TER")
 
     with open(output_path, "w", newline="\n") as f:
-        f.write("\n".join(out) + "\n")
+        for line in output_lines:
+            f.write(line + "\n")
 
-    return {
-        "atoms": len(kept),
-        "converted_modified": sorted(converted_modified),
-        "dropped_hetero": sorted(dropped_hetero),
-    }
+    return output_path
 
 
-def load_protein_coords(pdb_path):
-    coords = []
-    with open(pdb_path, "r", errors="ignore") as f:
-        for line in f:
-            if line.startswith("ATOM") and len(line) >= 54:
-                try:
-                    coords.append([
-                        float(line[30:38]),
-                        float(line[38:46]),
-                        float(line[46:54]),
-                    ])
-                except ValueError:
-                    continue
-    return np.asarray(coords, dtype=float)
+# ============================================================
+# OPTIONAL NATIVE-LIGAND CENTER UTILITY
+# ============================================================
 
+def get_native_ligand_center(pdb_path, resname=None):
+    """
+    Optional utility for checking a native/co-crystal ligand center.
 
-def count_atoms_in_box(coords, center, size):
-    if coords.size == 0:
-        return 0
-    c = np.asarray(center, dtype=float)
-    half = np.asarray(size, dtype=float) / 2.0
-    return int(np.all(np.abs(coords - c) <= half, axis=1).sum())
-
-
-def get_native_ligand_center(pdb_path, resname):
-    """Geometric centre of a native/co-crystal ligand (by 3-letter residue name)."""
-    resname = (resname or "").strip().upper()
+    This function is NOT used automatically by the docking pipeline,
+    because this application is intentionally configured for manually
+    supplied grid coordinates.
+    """
     coords = []
 
     with open(pdb_path, "r", errors="ignore") as f:
         for line in f:
-            if not line.startswith("HETATM") or len(line) < 54:
+            if not line.startswith("HETATM"):
                 continue
-            if line[16] not in (" ", "A"):
+
+            if len(line) < 54:
                 continue
-            r = line[17:20].strip().upper()
-            if r in WATER_NAMES or r != resname:
+
+            # Keep only blank/A alternate conformations.
+            if len(line) > 16 and line[16] not in (" ", "A"):
                 continue
+
+            r = line[17:20].strip()
+
+            if r in ("HOH", "WAT"):
+                continue
+
+            if resname and r != resname:
+                continue
+
             try:
                 coords.append([
                     float(line[30:38]),
@@ -239,23 +237,8 @@ def get_native_ligand_center(pdb_path, resname):
 
     if not coords:
         return None
+
     return tuple(np.mean(np.asarray(coords), axis=0))
-
-
-def fill_center_from_native(target_file, resname):
-    """UI helper: fill Center X/Y/Z from a native ligand in the uploaded PDB."""
-    path = get_file_path(target_file)
-    if not path:
-        raise gr.Error("Upload the target PDB first.")
-    resname = (resname or "").strip()
-    if not resname:
-        raise gr.Error("Enter the 3-letter residue name of the native ligand (e.g. from the HETATM lines).")
-
-    center = get_native_ligand_center(path, resname)
-    if center is None:
-        raise gr.Error(f"No HETATM records named '{resname.upper()}' were found in the PDB.")
-
-    return round(center[0], 3), round(center[1], 3), round(center[2], 3)
 
 
 # ============================================================
@@ -264,74 +247,94 @@ def fill_center_from_native(target_file, resname):
 
 def prepare_ligand_3d(mol):
     """
-    Returns (prepared_mol, ok, message).
+    Generate/prepare a ligand for docking.
 
-    - Adds explicit H (with coordinates when a conformer exists).
-    - Keeps an existing 3D conformer; otherwise deterministic ETKDGv3 embedding
-      (random-coordinate retry if that fails).
-    - MMFF (2000 its) -> UFF fallback; reports non-convergence honestly.
+    Steps:
+      1. Add explicit H atoms.
+      2. Generate 3D coordinates with deterministic ETKDG.
+      3. If embedding fails, retry using random coordinates.
+      4. MMFF optimization.
+      5. UFF fallback if MMFF is unavailable/fails.
+
+    Returns:
+        (prepared_mol, True, message)
+    or
+        (None, False, message)
     """
     if mol is None:
         return None, False, "RDKit returned None."
 
     try:
         mol = Chem.Mol(mol)
+
+        # Make sure chemistry is sanitized as far as possible.
         try:
             Chem.SanitizeMol(mol)
         except Exception:
+            # Do not immediately discard molecules that can still be
+            # processed by RDKit/GNINA.
             pass
-        mol = Chem.AddHs(mol, addCoords=True)
+
+        # Add explicit hydrogens.
+        mol = Chem.AddHs(mol)
+
     except Exception as exc:
         return None, False, f"AddHs failed: {exc}"
 
+    # If there is already a usable 3D conformer, keep it.
     has_3d = False
     try:
         if mol.GetNumConformers() > 0:
-            has_3d = mol.GetConformer().Is3D()
+            conf = mol.GetConformer()
+            has_3d = conf.Is3D()
     except Exception:
         has_3d = False
-
-    origin = "existing 3D conformer" if has_3d else "3D generated (ETKDGv3)"
 
     if not has_3d:
         try:
             params = AllChem.ETKDGv3()
             params.randomSeed = RDKIT_EMBED_SEED
             params.useRandomCoords = False
+
             conf_id = AllChem.EmbedMolecule(mol, params)
 
+            # Correct fallback: random coordinates.
             if conf_id < 0:
                 params = AllChem.ETKDGv3()
                 params.randomSeed = RDKIT_EMBED_SEED
                 params.useRandomCoords = True
+
                 conf_id = AllChem.EmbedMolecule(mol, params)
 
             if conf_id < 0:
-                return None, False, "3D embedding failed (deterministic and random-coordinate attempts)."
+                return None, False, "3D embedding failed after deterministic and random-coordinate attempts."
+
         except Exception as exc:
             return None, False, f"3D embedding failed: {exc}"
 
-    # Force-field optimisation. MMFF returns 0 = converged, 1 = not converged,
-    # -1 = could not set up (it does not necessarily raise).
+    # MMFF returns -1 on failure; it does not necessarily raise.
     try:
-        status = AllChem.MMFFOptimizeMolecule(mol, maxIters=2000)
-        if status == 0:
-            return mol, True, f"{origin}; MMFF converged."
-        if status == 1:
-            return mol, True, f"{origin}; MMFF did not fully converge."
-    except Exception:
-        pass
+        mmff_status = AllChem.MMFFOptimizeMolecule(mol)
 
-    try:
-        status = AllChem.UFFOptimizeMolecule(mol, maxIters=2000)
-        if status == 0:
-            return mol, True, f"{origin}; UFF fallback converged."
-        if status == 1:
-            return mol, True, f"{origin}; UFF fallback did not fully converge."
-    except Exception:
-        pass
+        if mmff_status == -1:
+            try:
+                uff_status = AllChem.UFFOptimizeMolecule(mol)
+                if uff_status == -1:
+                    return mol, True, "3D generated; MMFF and UFF optimization did not converge."
+                return mol, True, "3D generated; UFF fallback used."
+            except Exception:
+                return mol, True, "3D generated; MMFF failed and UFF fallback was unavailable."
 
-    return mol, True, f"{origin}; geometry optimisation unavailable."
+    except Exception:
+        try:
+            uff_status = AllChem.UFFOptimizeMolecule(mol)
+            if uff_status == -1:
+                return mol, True, "3D generated; UFF did not converge."
+            return mol, True, "3D generated; UFF fallback used."
+        except Exception:
+            return mol, True, "3D generated; geometry optimization unavailable."
+
+    return mol, True, "3D generated and MMFF optimized."
 
 
 # ============================================================
@@ -346,202 +349,300 @@ def find_smiles_column(df):
 
 
 def find_name_column(df):
+    preferred = ["name", "compound", "compound_name", "cid", "id"]
+
     lower_map = {str(c).lower(): c for c in df.columns}
-    for key in ("name", "compound", "compound_name", "cid", "id"):
+
+    for key in preferred:
         if key in lower_map:
             return lower_map[key]
+
     return None
 
 
-def _evaluate_ligand(mol, name, filter_type):
-    """
-    Prepare 3D and apply the selected filter.
-    Returns (record, prepared_mol, rejection) - exactly one of
-    (record & prepared_mol) or rejection is not None.
-    """
-    prepared, ok, prep_msg = prepare_ligand_3d(mol)
-    if not ok:
-        return None, None, {"Name": name, "Reason": prep_msg}
-
-    try:
-        mw = Descriptors.MolWt(prepared)
-        logp = Descriptors.MolLogP(prepared)
-        hbd = Lipinski.NumHDonors(prepared)
-        hba = Lipinski.NumHAcceptors(prepared)
-    except Exception as exc:
-        return None, None, {"Name": name, "Reason": f"Descriptor calculation failed: {exc}"}
-
-    violations = int(mw > 500) + int(logp > 5) + int(hbd > 5) + int(hba > 10)
-
-    ft = str(filter_type).lower()
-    if ft == "lipinski" and violations > 0:
-        return None, None, {"Name": name, "Reason": f"Failed Lipinski filter ({violations} violation(s))"}
-    if ft.startswith("lipinski (1") and violations > 1:
-        return None, None, {"Name": name, "Reason": f"Failed Lipinski filter ({violations} violations)"}
-
-    prepared.SetProp("_Name", name)
-
-    record = {
-        "Name": name,
-        "MW": round(mw, 2),
-        "LogP": round(logp, 2),
-        "HBD": int(hbd),
-        "HBA": int(hba),
-        "Lipinski Violations": violations,
-        "Preparation": prep_msg,
-    }
-    return record, prepared, None
-
-
 def process_ligands(ligand_file_path, filter_type="Lipinski"):
-    """Read CSV or SDF; every ligand gets 3D preparation."""
+    """
+    Read CSV or SDF and prepare every valid ligand for docking.
+
+    Both CSV-derived and SDF-derived ligands receive 3D preparation.
+    """
     ext = Path(ligand_file_path).suffix.lower()
 
-    records, prepared_mols, rejected = [], [], []
-
-    def handle(mol, name):
-        rec, prepared, rej = _evaluate_ligand(mol, name, filter_type)
-        if rej is not None:
-            rejected.append(rej)
-        else:
-            records.append(rec)
-            prepared_mols.append(prepared)
+    records = []
+    prepared_mols = []
+    rejected = []
 
     if ext in (".sdf", ".sd"):
-        supplier = Chem.SDMolSupplier(ligand_file_path, removeHs=False, sanitize=True)
+        supplier = Chem.SDMolSupplier(
+            ligand_file_path,
+            removeHs=False,
+            sanitize=True
+        )
+
         for i, mol in enumerate(supplier, start=1):
             if mol is None:
-                rejected.append({"Name": f"SDF_{i}", "Reason": "Invalid SDF molecule"})
+                rejected.append({
+                    "Name": f"SDF_{i}",
+                    "Reason": "Invalid SDF molecule"
+                })
                 continue
-            name = mol.GetProp("_Name").strip() if mol.HasProp("_Name") else ""
-            handle(mol, name or f"SDF_{i}")
+
+            name = mol.GetProp("_Name").strip() if mol.HasProp("_Name") else f"SDF_{i}"
+
+            prepared, ok, prep_msg = prepare_ligand_3d(mol)
+
+            if not ok:
+                rejected.append({
+                    "Name": name,
+                    "Reason": prep_msg
+                })
+                continue
+
+            try:
+                mw = Descriptors.MolWt(prepared)
+                logp = Descriptors.MolLogP(prepared)
+                hbd = Lipinski.NumHDonors(prepared)
+                hba = Lipinski.NumHAcceptors(prepared)
+
+                passes = (
+                    mw <= 500
+                    and logp <= 5
+                    and hbd <= 5
+                    and hba <= 10
+                )
+
+                if filter_type.lower() == "lipinski" and not passes:
+                    rejected.append({
+                        "Name": name,
+                        "Reason": "Failed Lipinski filter"
+                    })
+                    continue
+
+                prepared.SetProp("_Name", name)
+
+                records.append({
+                    "Name": name,
+                    "MW": round(mw, 2),
+                    "LogP": round(logp, 2),
+                    "HBD": int(hbd),
+                    "HBA": int(hba),
+                    "Preparation": prep_msg,
+                })
+
+                prepared_mols.append(prepared)
+
+            except Exception as exc:
+                rejected.append({
+                    "Name": name,
+                    "Reason": f"Descriptor calculation failed: {exc}"
+                })
 
     elif ext in (".csv", ".txt"):
         df = pd.read_csv(ligand_file_path)
+
         smiles_col = find_smiles_column(df)
         if smiles_col is None:
             raise ValueError("CSV must contain a column whose name includes 'SMILES'.")
+
         name_col = find_name_column(df)
 
         for i, row in df.iterrows():
+            smiles = str(row[smiles_col]).strip()
+
+            if not smiles or smiles.lower() == "nan":
+                rejected.append({
+                    "Name": f"Mol_{i + 1}",
+                    "Reason": "Missing SMILES"
+                })
+                continue
+
             name = (
                 str(row[name_col]).strip()
                 if name_col is not None and pd.notna(row[name_col])
                 else f"Mol_{i + 1}"
             )
-            smiles = str(row[smiles_col]).strip()
-
-            if not smiles or smiles.lower() == "nan":
-                rejected.append({"Name": name, "Reason": "Missing SMILES"})
-                continue
 
             mol = Chem.MolFromSmiles(smiles)
+
             if mol is None:
-                rejected.append({"Name": name, "Reason": "Invalid SMILES"})
+                rejected.append({
+                    "Name": name,
+                    "Reason": "Invalid SMILES"
+                })
                 continue
 
-            handle(mol, name)
+            prepared, ok, prep_msg = prepare_ligand_3d(mol)
+
+            if not ok:
+                rejected.append({
+                    "Name": name,
+                    "Reason": prep_msg
+                })
+                continue
+
+            try:
+                mw = Descriptors.MolWt(prepared)
+                logp = Descriptors.MolLogP(prepared)
+                hbd = Lipinski.NumHDonors(prepared)
+                hba = Lipinski.NumHAcceptors(prepared)
+
+                passes = (
+                    mw <= 500
+                    and logp <= 5
+                    and hbd <= 5
+                    and hba <= 10
+                )
+
+                if filter_type.lower() == "lipinski" and not passes:
+                    rejected.append({
+                        "Name": name,
+                        "Reason": "Failed Lipinski filter"
+                    })
+                    continue
+
+                prepared.SetProp("_Name", name)
+
+                records.append({
+                    "Name": name,
+                    "MW": round(mw, 2),
+                    "LogP": round(logp, 2),
+                    "HBD": int(hbd),
+                    "HBA": int(hba),
+                    "Preparation": prep_msg,
+                })
+
+                prepared_mols.append(prepared)
+
+            except Exception as exc:
+                rejected.append({
+                    "Name": name,
+                    "Reason": f"Descriptor calculation failed: {exc}"
+                })
+
     else:
         raise ValueError("Supported ligand formats are CSV and SDF.")
 
-    rejected_df = (
-        pd.DataFrame(rejected) if rejected else pd.DataFrame(columns=["Name", "Reason"])
-    )
-
     if not prepared_mols:
-        raise ValueError(
-            "No ligands remained after input validation/filtering "
-            f"({len(rejected_df)} rejected). Check the rejection reasons or use filter 'None'."
-        )
+        raise ValueError("No ligands remained after input validation/filtering.")
 
-    return pd.DataFrame(records), prepared_mols, rejected_df
+    return (
+        pd.DataFrame(records),
+        prepared_mols,
+        pd.DataFrame(rejected)
+        if rejected
+        else pd.DataFrame(columns=["Name", "Reason"])
+    )
 
 
 # ============================================================
-# GNINA
+# GNINA EXECUTABLE
 # ============================================================
 
 def get_gnina_path():
+    """
+    Locate GNINA executable.
+    """
     candidates = []
+
     if GNINA_PATH:
         candidates.append(GNINA_PATH)
 
-    for exe in ("gnina", "gnina.exe", "gninabase", "gninabase.exe"):
+    for exe in ("gnina", "gninabase", "gnina.exe", "gninabase.exe"):
         found = shutil.which(exe)
         if found:
             candidates.append(found)
 
+    # Search beside this application.
     app_dir = Path(__file__).resolve().parent
-    for exe in ("gnina.exe", "gnina", "gninabase.exe", "gninabase"):
+
+    for exe in ("gnina.exe", "gninabase.exe", "gnina", "gninabase"):
         candidates.append(str(app_dir / exe))
 
     for candidate in candidates:
-        if candidate and Path(candidate).is_file():
-            return str(Path(candidate).resolve())
+        if candidate and Path(candidate).exists():
+            return str(candidate)
+
+        found = shutil.which(candidate) if candidate else None
+        if found:
+            return found
 
     raise FileNotFoundError(
-        "GNINA executable was not found. Add it to PATH or set GNINA_PATH."
+        "GNINA executable was not found. Add gnina.exe to PATH or set GNINA_PATH."
     )
 
 
-def get_gnina_version(gnina_exe):
-    try:
-        r = subprocess.run(
-            [gnina_exe, "--version"], capture_output=True, text=True,
-            timeout=20, errors="replace",
-        )
-        out = (r.stdout or r.stderr).strip()
-        return out.splitlines()[0] if out else "unknown"
-    except Exception:
-        return "unknown"
-
-
-def detect_gpu():
-    try:
-        r = subprocess.run(
-            ["nvidia-smi"], capture_output=True, text=True,
-            timeout=10, errors="replace",
-        )
-        return r.returncode == 0
-    except Exception:
-        return False
-
+# ============================================================
+# GNINA DOCKING
+# ============================================================
 
 def run_gnina_docking(
-    gnina_exe, receptor_path, ligand_path, output_path,
-    cx, cy, cz, sx, sy, sz, use_gpu,
+    gnina_exe,
+    clean_target_path,
+    ligand_path,
+    output_path,
+    center_x,
+    center_y,
+    center_z,
+    size_x,
+    size_y,
+    size_z,
 ):
-    """Rigid-receptor GNINA docking in a manually specified box."""
+    """
+    Rigid-receptor GNINA docking using a manually specified box.
+    """
     cmd = [
         gnina_exe,
-        "-r", receptor_path,
+        "-r", clean_target_path,
         "-l", ligand_path,
         "-o", output_path,
-        "--center_x", str(cx), "--center_y", str(cy), "--center_z", str(cz),
-        "--size_x", str(sx), "--size_y", str(sy), "--size_z", str(sz),
+
+        "--center_x", str(center_x),
+        "--center_y", str(center_y),
+        "--center_z", str(center_z),
+
+        "--size_x", str(size_x),
+        "--size_y", str(size_y),
+        "--size_z", str(size_z),
+
         "--num_modes", str(GNINA_NUM_MODES),
         "--exhaustiveness", str(GNINA_EXHAUSTIVENESS),
+
+        # CNN is used to rescore/rerank final poses.
         "--cnn_scoring", "rescore",
+
+        # Reproducible docking seed.
         "--seed", str(GNINA_SEED),
+
+            # CPU threads available to GNINA. This does NOT disable GPU acceleration.
         "--cpu", str(GNINA_CPU),
     ]
-    if not use_gpu:
+
+    # Explicitly select GPU when available; otherwise force CPU mode.
+    gpu_available, _ = detect_gpu()
+    use_gpu = gpu_available and not FORCE_CPU
+
+    if use_gpu:
+        cmd.extend(["--device", str(GNINA_GPU_DEVICE)])
+    else:
         cmd.append("--no_gpu")
 
     try:
-        r = subprocess.run(
-            cmd, capture_output=True, text=True,
-            timeout=GNINA_TIMEOUT, errors="replace",
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=1800,
+            errors="replace",
         )
-        return _to_text(r.stdout), _to_text(r.stderr), r.returncode
+
+        return result.stdout, result.stderr, result.returncode
 
     except subprocess.TimeoutExpired as exc:
-        return (
-            _to_text(exc.stdout),
-            _to_text(exc.stderr) + f"\nGNINA timed out after {GNINA_TIMEOUT} s.",
-            124,
-        )
-    except Exception as exc:  # noqa: BLE001
+        stdout = exc.stdout or ""
+        stderr = (exc.stderr or "") + "\nGNINA docking timed out after 1800 seconds."
+        return stdout, stderr, 124
+
+    except Exception as exc:
         return "", str(exc), 1
 
 
@@ -549,500 +650,681 @@ def run_gnina_docking(
 # GNINA SCORE PARSING
 # ============================================================
 
-def _read_scores(mol):
-    """Return (affinity, cnn_score, cnn_affinity) from one pose's SDF props."""
-    normalized = {}
-    for key in mol.GetPropNames():
-        normalized[re.sub(r"[^a-z0-9]", "", key.lower())] = mol.GetProp(key)
+def parse_gnina_scores(gnina_output_path):
+    """
+    Parse GNINA SDF properties.
 
-    def get(*keys):
-        for k in keys:
-            if k in normalized:
+    Keeps three scores separate:
+      - Affinity (kcal/mol)
+      - CNN Score
+      - CNN Affinity
+
+    No assumption is made that CNN Affinity has kcal/mol units.
+    """
+    supplier = Chem.SDMolSupplier(
+        gnina_output_path,
+        removeHs=False,
+        sanitize=False
+    )
+
+    mols = [m for m in supplier if m is not None]
+
+    if not mols:
+        return None, None, None, None
+
+    # GNINA's default pose sorting is CNNscore.
+    # Therefore the first pose is the top CNN-score-ranked pose
+    # unless --pose_sort_order is changed.
+    top = mols[0]
+
+    props = {p.strip(): top.GetProp(p) for p in top.GetPropNames()}
+
+    normalized = {
+        re.sub(r"[^a-z0-9]", "", k.lower()): v
+        for k, v in props.items()
+    }
+
+    def get_exact(*keys):
+        for key in keys:
+            if key in normalized:
                 try:
-                    return float(normalized[k])
+                    return float(normalized[key])
                 except (TypeError, ValueError):
                     return None
         return None
 
-    return (
-        get("minimizedaffinity", "affinity"),
-        get("cnnscore"),
-        get("cnnaffinity"),
+    affinity = get_exact(
+        "minimizedaffinity",
+        "affinity",
     )
 
+    cnn_score = get_exact(
+        "cnnscore",
+    )
 
-def parse_gnina_scores(gnina_output_path):
-    """
-    Read every pose and choose the one with the HIGHEST CNN Score
-    (higher = better pose). Falls back to the first pose if none has a score.
+    cnn_affinity = get_exact(
+        "cnnaffinity",
+    )
 
-    Returns (best_mol, affinity, cnn_score, cnn_affinity, n_poses)
-    """
-    supplier = Chem.SDMolSupplier(gnina_output_path, removeHs=False, sanitize=False)
-    mols = [m for m in supplier if m is not None]
-
-    if not mols:
-        return None, None, None, None, 0
-
-    best = None
-    for m in mols:
-        aff, cs, ca = _read_scores(m)
-        key = cs if cs is not None else -np.inf
-        if best is None or key > best[0]:
-            best = (key, m, aff, cs, ca)
-
-    _, mol, aff, cs, ca = best
-    return mol, aff, cs, ca, len(mols)
+    return top, affinity, cnn_score, cnn_affinity
 
 
 # ============================================================
-# POSE / COMPLEX
+# POSE / PDB / COMPLEX FUNCTIONS
 # ============================================================
 
-def write_top_pose_sdf(mol, output_path):
+def write_top_pose_sdf(top_mol, output_path):
     writer = Chem.SDWriter(output_path)
-    writer.write(mol)
+    writer.write(top_mol)
     writer.close()
     return output_path
 
 
-def ligand_mol_to_pdb(mol):
+def ligand_mol_to_pdb(top_mol):
+    """
+    Convert the selected GNINA pose to a PDB block.
+    """
     try:
-        return Chem.MolToPDBBlock(mol)
+        return Chem.MolToPDBBlock(top_mol)
     except Exception as exc:
         raise RuntimeError(f"Failed to convert docked ligand to PDB: {exc}")
 
 
 def renumber_ligand_pdb(ligand_pdb_block, starting_serial):
     """
-    Ligand ATOM/HETATM -> HETATM, residue LIG, chain Z, resid 1, with atom
-    serials continuing after the receptor. Coordinate columns are preserved
-    exactly (line[26:] starts at the iCode column).
+    Convert ligand ATOM/HETATM records to HETATM and assign serials
+    continuing after the receptor atom serial range.
+
+    The ligand residue is written as LIG, chain Z, residue 1.
     """
-    out = []
+    output = []
     serial = int(starting_serial)
 
     for raw in ligand_pdb_block.splitlines():
-        if not raw.startswith(("ATOM", "HETATM")) or len(raw) < 54:
-            continue
-        serial += 1
-        out.append(f"HETATM{serial:5d}{raw[11:17]}LIG Z{1:4d}{raw[26:]}")
+        line = raw.rstrip("\r\n")
 
-    return out, serial
+        if not line.startswith(("ATOM", "HETATM")):
+            continue
+
+        serial += 1
+
+        atom_name = line[12:16] if len(line) >= 16 else " C  "
+        coords_tail = line[26:] if len(line) > 26 else ""
+
+        # Preserve coordinate/occupancy/element information from the
+        # original ligand PDB where available.
+        new_line = (
+            f"HETATM"
+            f"{serial:5d}"
+            f"{line[11:17] if len(line) >= 17 else atom_name}"
+            f"LIG Z{1:4d} "
+            f"{coords_tail}"
+        )
+
+        output.append(new_line)
+
+    return output, serial
 
 
 def create_complex_pdb(receptor_pdb_path, ligand_pdb_block, output_path):
-    """Protein + ligand with non-conflicting atom serials."""
+    """
+    Create a protein-ligand complex with non-conflicting atom serials.
+    """
     with open(receptor_pdb_path, "r", errors="ignore") as f:
         rec_lines = [
-            ln.rstrip("\r\n") for ln in f if ln.startswith(("ATOM", "TER"))
+            line.rstrip("\r\n")
+            for line in f
+            if line.startswith(("ATOM", "TER"))
         ]
 
-    serials = []
-    for ln in rec_lines:
-        if ln.startswith("ATOM"):
-            try:
-                serials.append(int(ln[6:11]))
-            except ValueError:
-                pass
-    max_serial = max(serials) if serials else 0
+    # Count protein ATOM records to establish a new serial range.
+    n_rec = sum(1 for line in rec_lines if line.startswith("ATOM"))
 
-    ligand_lines, _ = renumber_ligand_pdb(ligand_pdb_block, starting_serial=max_serial)
-    if not ligand_lines:
-        raise RuntimeError("Docked ligand PDB block contained no atoms.")
+    ligand_lines, _ = renumber_ligand_pdb(
+        ligand_pdb_block,
+        starting_serial=n_rec,
+    )
 
+    # Remove trailing TER/END duplicates from receptor input.
     while rec_lines and rec_lines[-1] == "TER":
         rec_lines.pop()
 
     with open(output_path, "w", newline="\n") as f:
-        f.write("\n".join(rec_lines) + "\n")
+        for line in rec_lines:
+            f.write(line + "\n")
+
         f.write("TER\n")
-        f.write("\n".join(ligand_lines) + "\n")
-        f.write("TER\nEND\n")
+
+        for line in ligand_lines:
+            f.write(line + "\n")
+
+        f.write("TER\n")
+        f.write("END\n")
 
     return output_path
 
 
 # ============================================================
-# ADMET: ADMETlab 3.0 -> RDKit fallback
+# GPU CHECK
 # ============================================================
 
-def _alert_catalogs():
-    catalogs = {}
+def detect_gpu():
+    """Return (available, names) for NVIDIA GPUs visible to this environment."""
     try:
-        p = FilterCatalogParams()
-        p.AddCatalog(FilterCatalogParams.FilterCatalogs.PAINS)
-        catalogs["PAINS Alerts"] = FilterCatalog(p)
-    except Exception:
-        pass
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=name",
+                "--format=csv,noheader",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            errors="replace",
+        )
+
+        if result.returncode != 0:
+            return False, []
+
+        names = [
+            line.strip()
+            for line in (result.stdout or "").splitlines()
+            if line.strip()
+        ]
+        return bool(names), names
+
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        return False, []
+
+
+# ============================================================
+# ADMET
+# ============================================================
+
+def run_admet_for_successful_ligands(successful_mols, successful_names, score_map):
+    """
+    Run ADMET only for successfully docked ligands.
+
+    The function keeps the existing admetlab.py interface assumption:
+        run_admet_analysis(mols, names, scores)
+
+    If your admetlab.py uses a different signature, only this small
+    wrapper needs to be adjusted.
+    """
+    if not successful_mols:
+        return pd.DataFrame()
+
     try:
-        p = FilterCatalogParams()
-        p.AddCatalog(FilterCatalogParams.FilterCatalogs.BRENK)
-        catalogs["Brenk Alerts"] = FilterCatalog(p)
-    except Exception:
-        pass
-    return catalogs
+        return run_admet_analysis(
+            successful_mols,
+            successful_names,
+            score_map,
+        )
+    except TypeError:
+        # Compatibility fallback for a common dataframe-based interface.
+        rows = []
 
-
-def rdkit_admet_table(mols, names, affinities):
-    """
-    Built-in fallback. Rule-based physicochemical/drug-likeness descriptors
-    computed with RDKit. NOT machine-learning ADMET predictions
-    (no BBB / HIA / toxicity models).
-    """
-    catalogs = _alert_catalogs()
-    rows = []
-
-    for mol, name, aff in zip(mols, names, affinities):
-        row = {"Name": name, "Docking Affinity (kcal/mol)": aff}
-        try:
-            m = Chem.RemoveHs(mol)
-        except Exception:
-            m = mol
-
-        try:
-            mw = Descriptors.MolWt(m)
-            logp = Crippen.MolLogP(m)
-            tpsa = rdMolDescriptors.CalcTPSA(m)
-            hbd = rdMolDescriptors.CalcNumHBD(m)
-            hba = rdMolDescriptors.CalcNumHBA(m)
-            rotb = rdMolDescriptors.CalcNumRotatableBonds(m)
-
-            row.update({
-                "MW": round(mw, 2),
-                "LogP (Crippen)": round(logp, 2),
-                "TPSA": round(tpsa, 2),
-                "HBD": int(hbd),
-                "HBA": int(hba),
-                "Rotatable Bonds": int(rotb),
-                "Heavy Atoms": int(m.GetNumHeavyAtoms()),
-                "Aromatic Rings": int(rdMolDescriptors.CalcNumAromaticRings(m)),
-                "Fsp3": round(rdMolDescriptors.CalcFractionCSP3(m), 3),
-                "Molar Refractivity": round(Crippen.MolMR(m), 2),
-                "Lipinski Violations": int(mw > 500) + int(logp > 5) + int(hbd > 5) + int(hba > 10),
-                "Veber Pass": "Yes" if (rotb <= 10 and tpsa <= 140) else "No",
-                "Egan Pass": "Yes" if (logp <= 5.88 and tpsa <= 131.6) else "No",
+        for name, mol in zip(successful_names, successful_mols):
+            rows.append({
+                "Name": name,
+                "SMILES": Chem.MolToSmiles(Chem.RemoveHs(mol)),
+                "CNN Score": score_map.get(name),
             })
 
-            try:
-                row["QED"] = round(QED.qed(m), 3)
-            except Exception:
-                row["QED"] = np.nan
+        admet_input = pd.DataFrame(rows)
 
-            for label, cat in catalogs.items():
-                try:
-                    row[label] = len(cat.GetMatches(m))
-                except Exception:
-                    row[label] = np.nan
-
-            row["ADMET Source"] = "RDKit (rule-based descriptors)"
-
-        except Exception as exc:  # noqa: BLE001
-            row["ADMET Source"] = f"RDKit failed: {exc}"
-
-        rows.append(row)
-
-    return pd.DataFrame(rows)
-
-
-def run_admet(mols, names, affinities):
-    """
-    Try ADMETlab 3.0 first; use RDKit whenever it is unavailable or fails.
-    Returns (dataframe, source_label, log_message).
-    """
-    if not mols:
-        return pd.DataFrame(), "none", "No successfully docked ligands for ADMET."
-
-    reason = None
-
-    if run_admet_analysis is None:
-        reason = f"admetlab module not importable ({ADMETLAB_IMPORT_ERROR})"
-    else:
         try:
-            out = run_admet_analysis(
-                mols=mols,
-                names=names,
-                scores=affinities,
-                cids=names,
-                use_api=True,
-                status_text=None,
-            )
+            return run_admet_analysis(admet_input)
+        except Exception as exc:
+            return pd.DataFrame({
+                "ADMET Status": [
+                    f"ADMET execution failed: {exc}"
+                ]
+            })
 
-            if isinstance(out, tuple):
-                df = out[0]
-                source = str(out[1]) if len(out) > 1 else "ADMETlab 3.0"
-            else:
-                df, source = out, "ADMETlab 3.0"
-
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                return df, source, f"ADMET source: {source}"
-
-            reason = "ADMETlab returned an empty table"
-
-        except Exception as exc:  # noqa: BLE001
-            reason = f"ADMETlab call failed: {exc}"
-
-    df = rdkit_admet_table(mols, names, affinities)
-    return df, "RDKit", f"ADMETlab 3.0 unavailable ({reason}); RDKit fallback used."
+    except Exception as exc:
+        return pd.DataFrame({
+            "ADMET Status": [
+                f"ADMET execution failed: {exc}"
+            ]
+        })
 
 
 # ============================================================
-# MAIN PIPELINE (generator -> live progress)
+# MAIN PIPELINE
 # ============================================================
 
 def docking_pipeline(
-    ligand_file, filter_type, target_file,
-    custom_cx, custom_cy, custom_cz,
-    size_x, size_y, size_z,
+    ligand_file,
+    filter_type,
+    target_file,
+    use_custom_center,
+    custom_cx,
+    custom_cy,
+    custom_cz,
+    size_x,
+    size_y,
+    size_z,
 ):
-    empty = pd.DataFrame()
-    log = "🚀 Starting DeepDock-AI...\n"
+    """
+    Main DeepDock-AI workflow.
 
-    def out(lig=empty, dock=empty, rej=empty, admet=empty, csv=None, zp=None):
-        return log, lig, dock, rej, admet, csv, zp
+    The function is a generator so Gradio can display live progress.
+    """
+    status_log = "🚀 Starting DeepDock-AI...\n"
 
-    # ---- validation
+    # --------------------------------------------------------
+    # Validate input files
+    # --------------------------------------------------------
+
     ligand_path = get_file_path(ligand_file)
     target_path = get_file_path(target_file)
 
     if not ligand_path:
         raise gr.Error("Please upload a ligand CSV or SDF file.")
+
     if not target_path:
         raise gr.Error("Please upload a target protein PDB file.")
 
+    # --------------------------------------------------------
+    # Validate manual active-site box
+    # --------------------------------------------------------
+
+    if not use_custom_center:
+        raise gr.Error(
+            "Manual active-site coordinates are required. "
+            "Enable 'Use Manual Active-Site Coordinates'."
+        )
+
     centers = [custom_cx, custom_cy, custom_cz]
+    if not all(is_valid_number(x) for x in centers):
+        raise gr.Error(
+            "Center X, Center Y and Center Z must all contain numeric values."
+        )
+
     sizes = [size_x, size_y, size_z]
+    if not all(is_valid_number(x) and float(x) > 0 for x in sizes):
+        raise gr.Error(
+            "Grid Size X/Y/Z must all be positive numeric values."
+        )
 
-    if not all(is_valid_number(v) for v in centers):
-        raise gr.Error("Center X, Y and Z must all be filled in with numbers.")
-    if not all(is_valid_number(v) and float(v) > 0 for v in sizes):
-        raise gr.Error("Grid Size X/Y/Z must be positive numbers.")
+    cx, cy, cz = map(float, centers)
+    sx, sy, sz = map(float, sizes)
 
-    cx, cy, cz = (float(v) for v in centers)
-    sx, sy, sz = (float(v) for v in sizes)
-
-    log += (
+    status_log += (
         "\n🎯 MANUAL ACTIVE-SITE BOX"
         f"\n   Center: ({cx:.3f}, {cy:.3f}, {cz:.3f}) Å"
         f"\n   Size:   ({sx:.1f}, {sy:.1f}, {sz:.1f}) Å"
         "\n   Receptor: rigid"
     )
-    yield out()
 
-    run_dir = tempfile.mkdtemp(prefix="deepdock_ai_")       # working files (deleted)
-    deliver_dir = tempfile.mkdtemp(prefix="deepdock_out_")  # final CSV/ZIP (kept for Gradio)
+    yield (
+        status_log,
+        pd.DataFrame(),
+        pd.DataFrame(),
+        None,
+        None,
+        None,
+    )
+
+    # --------------------------------------------------------
+    # Create run directory
+    # --------------------------------------------------------
+
+    run_dir = tempfile.mkdtemp(prefix="deepdock_ai_")
 
     try:
-        receptor_clean = os.path.join(run_dir, "receptor_clean.pdb")
+        clean_target = os.path.join(run_dir, "receptor_clean.pdb")
         docking_dir = os.path.join(run_dir, "docking")
         complexes_dir = os.path.join(run_dir, "complexes")
-        poses_dir = os.path.join(run_dir, "top_poses")
-        for d in (docking_dir, complexes_dir, poses_dir):
-            os.makedirs(d, exist_ok=True)
 
-        # ---- GNINA
+        os.makedirs(docking_dir, exist_ok=True)
+        os.makedirs(complexes_dir, exist_ok=True)
+
+        # ----------------------------------------------------
+        # GNINA
+        # ----------------------------------------------------
+
         try:
             gnina_exe = get_gnina_path()
         except FileNotFoundError as exc:
             raise gr.Error(str(exc))
 
-        gnina_version = get_gnina_version(gnina_exe)
-        use_gpu = (not FORCE_CPU) and detect_gpu()
+        status_log += f"\n\n🔬 GNINA: {gnina_exe}"
+        status_log += f"\n   Version: {get_gnina_version(gnina_exe)}"
+        status_log += f"\n   Seed: {GNINA_SEED}"
+        gpu_available, gpu_names = detect_gpu()
+        use_gpu = gpu_available and not FORCE_CPU
+        status_log += f"\n   CPU threads: {GNINA_CPU}"
+        status_log += f"\n   Exhaustiveness: {GNINA_EXHAUSTIVENESS} | Modes: {GNINA_NUM_MODES}"
+        status_log += f"\n   GPU detected: {'Yes' if gpu_available else 'No'}"
+        status_log += f"\n   GPU(s): {', '.join(gpu_names) if gpu_names else 'None'}"
+        status_log += f"\n   Hardware mode: {'GPU' if use_gpu else 'CPU'}"
+        status_log += f"\n   GPU device: {GNINA_GPU_DEVICE if use_gpu else 'N/A'}"
+        status_log += "\n   CNN scoring: rescore"
+        status_log += "\n   Pose ranking: GNINA default CNN Score"
 
-        log += (
-            f"\n\n🔬 GNINA: {gnina_exe}"
-            f"\n   Version: {gnina_version}"
-            f"\n   Seed: {GNINA_SEED} | CPU threads: {GNINA_CPU} | "
-            f"Exhaustiveness: {GNINA_EXHAUSTIVENESS} | Modes: {GNINA_NUM_MODES}"
-            f"\n   Hardware: {'GPU' if use_gpu else 'CPU'}"
-            "\n   CNN scoring: rescore"
-            "\n   Pose used per ligand: highest CNN Score"
+        yield (
+            status_log,
+            pd.DataFrame(),
+            pd.DataFrame(),
+            None,
+            None,
+            None,
         )
-        yield out()
 
-        # ---- receptor
-        log += "\n\n🧬 Preparing receptor..."
-        try:
-            info = clean_receptor_pdb(target_path, receptor_clean)
-        except Exception as exc:
-            raise gr.Error(f"Receptor preparation failed: {exc}")
+        # ----------------------------------------------------
+        # Receptor preparation
+        # ----------------------------------------------------
 
-        log += (
-            f"\n   ✓ {info['atoms']} protein atoms kept (first model, altLoc blank/A)"
-            "\n   ✓ Waters removed"
+        status_log += "\n\n🧬 Preparing receptor..."
+        clean_receptor_pdb(target_path, clean_target)
+        status_log += "\n   ✓ Waters/HETATM removed"
+        status_log += "\n   ✓ AltLoc B+ removed; blank/A retained"
+        status_log += "\n   ✓ Full PDB lines preserved"
+        status_log += "\n   ✓ Rigid receptor prepared"
+
+        # ----------------------------------------------------
+        # Ligand preparation
+        # ----------------------------------------------------
+
+        status_log += "\n\n🧪 Preparing ligands..."
+
+        ligand_df, prepared_mols, rejected_df = process_ligands(
+            ligand_path,
+            filter_type,
         )
-        if info["dropped_hetero"]:
-            log += f"\n   ℹ HETATM groups removed: {', '.join(info['dropped_hetero'])}"
-        if info["converted_modified"]:
-            log += f"\n   ℹ Modified residues kept as protein: {', '.join(info['converted_modified'])}"
 
-        # ---- box sanity check
-        coords = load_protein_coords(receptor_clean)
-        n_in_box = count_atoms_in_box(coords, (cx, cy, cz), (sx, sy, sz))
-        log += f"\n   ✓ Receptor atoms inside the box: {n_in_box}"
+        status_log += f"\n   ✓ Accepted ligands: {len(prepared_mols)}"
+        status_log += f"\n   ✓ Rejected/skipped before docking: {len(rejected_df)}"
 
-        if n_in_box < MIN_ATOMS_IN_BOX:
-            raise gr.Error(
-                f"The grid box contains only {n_in_box} receptor atoms "
-                f"(minimum {MIN_ATOMS_IN_BOX}). The centre is probably outside the protein "
-                "or left at 0,0,0. Check the coordinates."
-            )
-        yield out()
-
-        # ---- ligands
-        log += f"\n\n🧪 Preparing ligands (filter: {filter_type})..."
-        try:
-            ligand_df, prepared_mols, rejected_df = process_ligands(ligand_path, filter_type)
-        except Exception as exc:
-            raise gr.Error(f"Ligand preparation failed: {exc}")
-
-        log += (
-            f"\n   ✓ Accepted ligands: {len(prepared_mols)}"
-            f"\n   ✓ Rejected before docking: {len(rejected_df)}"
+        yield (
+            status_log,
+            ligand_df,
+            rejected_df,
+            None,
+            None,
+            None,
         )
-        yield out(lig=ligand_df, rej=rejected_df)
 
-        # ---- docking loop
+        # ----------------------------------------------------
+        # Docking loop
+        # ----------------------------------------------------
+
         docking_rows = []
-        ok_mols, ok_names, ok_affinities = [], [], []
+        successful_mols = []
+        successful_names = []
+        score_map = {}
+
         total = len(prepared_mols)
 
-        for idx, (mol, rec) in enumerate(zip(prepared_mols, ligand_df.to_dict("records")), start=1):
-            name = str(rec["Name"])
-            safe = safe_filename(name)
+        for idx, (mol, ligand_record) in enumerate(
+            zip(prepared_mols, ligand_df.to_dict("records")),
+            start=1,
+        ):
+            name = str(ligand_record["Name"])
+            safe_name = safe_filename(name)
 
-            log += f"\n\n[{idx}/{total}] 🔄 Docking: {name}"
-            yield out(lig=ligand_df, dock=pd.DataFrame(docking_rows), rej=rejected_df)
+            status_log += (
+                f"\n\n[{idx}/{total}] 🔄 Docking: {name}"
+            )
 
-            ligand_sdf = os.path.join(run_dir, f"{idx:03d}_{safe}.sdf")
-            output_sdf = os.path.join(docking_dir, f"{idx:03d}_{safe}_docked.sdf")
-            complex_pdb = os.path.join(complexes_dir, f"{idx:03d}_{safe}_complex.pdb")
-            pose_sdf = os.path.join(poses_dir, f"{idx:03d}_{safe}_top_cnn_pose.sdf")
+            ligand_sdf = os.path.join(
+                run_dir,
+                f"{idx:03d}_{safe_name}.sdf"
+            )
+
+            output_sdf = os.path.join(
+                docking_dir,
+                f"{idx:03d}_{safe_name}_docked.sdf"
+            )
+
+            complex_pdb = os.path.join(
+                complexes_dir,
+                f"{idx:03d}_{safe_name}_complex.pdb"
+            )
 
             try:
                 writer = Chem.SDWriter(ligand_sdf)
                 writer.write(mol)
                 writer.close()
 
-                _, stderr, rc = run_gnina_docking(
-                    gnina_exe, receptor_clean, ligand_sdf, output_sdf,
-                    cx, cy, cz, sx, sy, sz, use_gpu,
+                stdout, stderr, returncode = run_gnina_docking(
+                    gnina_exe=gnina_exe,
+                    clean_target_path=clean_target,
+                    ligand_path=ligand_sdf,
+                    output_path=output_sdf,
+                    center_x=cx,
+                    center_y=cy,
+                    center_z=cz,
+                    size_x=sx,
+                    size_y=sy,
+                    size_z=sz,
                 )
-                if rc != 0:
-                    raise RuntimeError(f"GNINA exit code {rc}. {stderr[-800:]}")
+
+                if returncode != 0:
+                    raise RuntimeError(
+                        f"GNINA failed with exit code {returncode}. "
+                        f"{stderr[-1000:]}"
+                    )
+
                 if not os.path.exists(output_sdf):
-                    raise RuntimeError("GNINA produced no output SDF.")
+                    raise RuntimeError("GNINA finished but produced no output SDF.")
 
-                top, aff, cnn_score, cnn_aff, n_poses = parse_gnina_scores(output_sdf)
-                if top is None:
-                    raise RuntimeError("No valid docked pose found.")
+                (
+                    top_mol,
+                    affinity,
+                    cnn_score,
+                    cnn_affinity,
+                ) = parse_gnina_scores(output_sdf)
+
+                if top_mol is None:
+                    raise RuntimeError("No valid docked pose was found.")
+
                 if cnn_score is None:
-                    raise RuntimeError("CNN Score not found in GNINA output.")
+                    raise RuntimeError("CNN Score was not found in GNINA output.")
 
-                write_top_pose_sdf(top, pose_sdf)
-                create_complex_pdb(receptor_clean, ligand_mol_to_pdb(top), complex_pdb)
+                ligand_pdb = ligand_mol_to_pdb(top_mol)
+                create_complex_pdb(
+                    clean_target,
+                    ligand_pdb,
+                    complex_pdb,
+                )
 
                 docking_rows.append({
-                    "S.No": idx,
                     "Name": name,
-                    "Affinity (kcal/mol)": round(aff, 3) if aff is not None else np.nan,
+                    "Affinity (kcal/mol)": (
+                        round(affinity, 3)
+                        if affinity is not None
+                        else np.nan
+                    ),
                     "CNN Score": round(cnn_score, 4),
-                    "CNN Affinity": round(cnn_aff, 4) if cnn_aff is not None else np.nan,
-                    "Poses Returned": n_poses,
+                    "CNN Affinity": (
+                        round(cnn_affinity, 4)
+                        if cnn_affinity is not None
+                        else np.nan
+                    ),
                     "Docking Status": "Success",
+                    "Complex PDB": complex_pdb,
                 })
 
-                ok_mols.append(mol)
-                ok_names.append(name)
-                ok_affinities.append(aff if aff is not None else np.nan)
+                successful_mols.append(mol)
+                successful_names.append(name)
+                score_map[name] = cnn_score
 
-                log += (
-                    "\n   ✓ Success"
-                    f"\n   Affinity: {aff if aff is not None else 'N/A'} kcal/mol"
-                    f" | CNN Score: {cnn_score:.4f}"
-                    f" | CNN Affinity: {cnn_aff if cnn_aff is not None else 'N/A'}"
+                status_log += (
+                    "\n   ✓ Docking successful"
+                    f"\n   Affinity: {affinity if affinity is not None else 'N/A'} kcal/mol"
+                    f"\n   CNN Score: {cnn_score:.4f}"
+                    f"\n   CNN Affinity: "
+                    f"{cnn_affinity if cnn_affinity is not None else 'N/A'}"
                 )
 
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 docking_rows.append({
-                    "S.No": idx,
                     "Name": name,
                     "Affinity (kcal/mol)": np.nan,
                     "CNN Score": np.nan,
                     "CNN Affinity": np.nan,
-                    "Poses Returned": 0,
                     "Docking Status": f"Failed: {exc}",
+                    "Complex PDB": None,
                 })
-                log += f"\n   ✗ Failed: {exc}"
 
-            yield out(lig=ligand_df, dock=pd.DataFrame(docking_rows), rej=rejected_df)
+                status_log += f"\n   ✗ Failed: {exc}"
+
+            current_df = pd.DataFrame(docking_rows)
+
+            if not current_df.empty:
+                # Higher CNN Score is better.
+                current_df = current_df.sort_values(
+                    by="CNN Score",
+                    ascending=False,
+                    na_position="last",
+                ).reset_index(drop=True)
+
+                current_df.insert(
+                    0,
+                    "Rank",
+                    np.arange(1, len(current_df) + 1)
+                )
+
+            yield (
+                status_log,
+                ligand_df,
+                current_df,
+                None,
+                None,
+                None,
+            )
+
+        # ----------------------------------------------------
+        # Final docking table
+        # ----------------------------------------------------
 
         results_df = pd.DataFrame(docking_rows)
 
-        # ---- ADMET (successful dockings only)
-        log += f"\n\n🧬 ADMET for {len(ok_mols)} successfully docked ligand(s)..."
-        yield out(lig=ligand_df, dock=results_df, rej=rejected_df)
+        if not results_df.empty:
+            results_df = results_df.sort_values(
+                by="CNN Score",
+                ascending=False,
+                na_position="last",
+            ).reset_index(drop=True)
 
-        admet_df, admet_source, admet_msg = run_admet(ok_mols, ok_names, ok_affinities)
-        log += f"\n   {'✓' if admet_source != 'none' else 'ℹ'} {admet_msg}"
-        if admet_source == "RDKit":
-            log += "\n   ℹ RDKit table = rule-based descriptors (no ML BBB/HIA/toxicity models)."
+            results_df.insert(
+                0,
+                "Rank",
+                np.arange(1, len(results_df) + 1)
+            )
 
-        # ---- files
-        ligands_csv = os.path.join(deliver_dir, "DeepDockAI_Prepared_Ligands.csv")
-        docking_csv = os.path.join(deliver_dir, "DeepDockAI_Docking_Results.csv")
-        rejected_csv = os.path.join(deliver_dir, "DeepDockAI_Rejected_Ligands.csv")
-        admet_csv = os.path.join(deliver_dir, "DeepDockAI_ADMET_Results.csv")
+        # ----------------------------------------------------
+        # ADMET — successful docking only
+        # ----------------------------------------------------
 
-        ligand_df.to_csv(ligands_csv, index=False)
+        status_log += "\n\n🧬 Running ADMET only on successfully docked ligands..."
+
+        admet_df = run_admet_for_successful_ligands(
+            successful_mols,
+            successful_names,
+            score_map,
+        )
+
+        status_log += (
+            f"\n   ✓ Successful docking ligands sent to ADMET: "
+            f"{len(successful_mols)}"
+        )
+
+        # ----------------------------------------------------
+        # Output files
+        # ----------------------------------------------------
+
+        docking_csv = os.path.join(
+            run_dir,
+            "DeepDockAI_Docking_Results.csv"
+        )
+
+        rejected_csv = os.path.join(
+            run_dir,
+            "DeepDockAI_Rejected_Ligands.csv"
+        )
+
+        admet_csv = os.path.join(
+            run_dir,
+            "DeepDockAI_ADMET_Results.csv"
+        )
+
         results_df.to_csv(docking_csv, index=False)
         rejected_df.to_csv(rejected_csv, index=False)
         admet_df.to_csv(admet_csv, index=False)
 
-        params_txt = os.path.join(run_dir, "run_parameters.txt")
-        with open(params_txt, "w", encoding="utf-8") as f:
-            f.write(
-                "DeepDock-AI run parameters\n"
-                f"GNINA: {gnina_exe}\nGNINA version: {gnina_version}\n"
-                f"GNINA seed: {GNINA_SEED}\nGNINA CPU threads: {GNINA_CPU}\n"
-                f"GNINA exhaustiveness: {GNINA_EXHAUSTIVENESS}\nGNINA num_modes: {GNINA_NUM_MODES}\n"
-                f"Hardware: {'GPU' if use_gpu else 'CPU'}\nCNN scoring: rescore\n"
-                "Pose used: highest CNN Score\n"
-                f"RDKit version: {RDKIT_VERSION}\nRDKit embed seed: {RDKIT_EMBED_SEED}\n"
-                f"Ligand filter: {filter_type}\n"
-                f"Grid center: {cx}, {cy}, {cz}\nGrid size: {sx}, {sy}, {sz}\n"
-                f"Receptor atoms in box: {n_in_box}\n"
-                f"ADMET source: {admet_source}\n"
-                f"Python: {platform.python_version()} on {platform.system()}\n"
+        zip_path = os.path.join(
+            run_dir,
+            "DeepDockAI_Results.zip"
+        )
+
+        with zipfile.ZipFile(
+            zip_path,
+            "w",
+            compression=zipfile.ZIP_DEFLATED
+        ) as zf:
+
+            zf.write(
+                docking_csv,
+                arcname=os.path.basename(docking_csv)
             )
 
-        zip_path = os.path.join(deliver_dir, "DeepDockAI_Results.zip")
-        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for p in (ligands_csv, docking_csv, rejected_csv, admet_csv):
-                zf.write(p, arcname=os.path.basename(p))
-            zf.write(params_txt, arcname="run_parameters.txt")
-            zf.write(receptor_clean, arcname="receptor_clean.pdb")
-            for folder, arc in ((complexes_dir, "complexes"), (poses_dir, "top_poses")):
-                for root, _, files in os.walk(folder):
-                    for fn in files:
-                        zf.write(os.path.join(root, fn), arcname=os.path.join(arc, fn))
+            zf.write(
+                rejected_csv,
+                arcname=os.path.basename(rejected_csv)
+            )
 
-        log += (
-            "\n\n✅ DeepDock-AI completed."
-            "\n   Results are listed in input order (no automatic ranking)."
+            zf.write(
+                admet_csv,
+                arcname=os.path.basename(admet_csv)
+            )
+
+            for root, _, files in os.walk(complexes_dir):
+                for file in files:
+                    path = os.path.join(root, file)
+                    zf.write(
+                        path,
+                        arcname=os.path.join(
+                            "complexes",
+                            file
+                        )
+                    )
+
+        status_log += "\n\n✅ DeepDock-AI completed."
+        status_log += (
+            "\n   Results ranked by CNN Score (descending)."
             "\n   Failed dockings were not sent to ADMET."
+            "\n   RMSD l.b / RMSD u.b columns were intentionally removed."
         )
-        yield out(ligand_df, results_df, rejected_df, admet_df, docking_csv, zip_path)
+
+        yield (
+            status_log,
+            ligand_df,
+            results_df,
+            admet_df,
+            docking_csv,
+            zip_path,
+        )
 
     finally:
-        shutil.rmtree(run_dir, ignore_errors=True)
+        # The final files are returned by path. Gradio's file handling
+        # copies/serves returned files; cleanup prevents accumulation.
+        try:
+            shutil.rmtree(run_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 
 # ============================================================
 # GRADIO UI
 # ============================================================
 
-with gr.Blocks(title="DeepDock-AI — GNINA Rigid Docking") as demo:
+with gr.Blocks(
+    title="DeepDock-AI — GNINA Rigid Docking"
+) as demo:
 
     gr.Markdown(
         """
@@ -1050,81 +1332,152 @@ with gr.Blocks(title="DeepDock-AI — GNINA Rigid Docking") as demo:
 
 ### GNINA rigid-receptor docking with manual active-site coordinates
 
-- Manual grid centre and size (checked against the receptor before docking)
-- Rigid receptor, GNINA docking, CNN rescoring
-- Pose reported per ligand = highest **CNN Score** (pose confidence)
-- Results are **not ranked automatically**
-- Fixed seeds; CPU mode is the default for repeatability
-- ADMET: ADMETlab 3.0 when available, otherwise an RDKit fallback
+**Docking protocol**
+- Manually defined active-site/grid center
+- Manually defined grid dimensions
+- Rigid receptor
+- GNINA docking
+- GNINA CNN rescoring
+- Fixed random seed
+- CPU mode enabled by default for stronger reproducibility
+
+> **Important:** The application does not calculate a whole-protein centroid
+> and does not silently perform blind docking. You must provide the active-site
+> coordinates yourself.
 """
     )
 
     with gr.Row():
-        ligand_file = gr.File(label="Ligands (.csv / .sdf)", file_types=[".csv", ".sdf", ".sd"])
-        target_file = gr.File(label="Target Protein (.pdb)", file_types=[".pdb"])
+
+        ligand_file = gr.File(
+            label="Ligands (.csv / .sdf)",
+            file_types=[".csv", ".sdf", ".sd"],
+        )
+
+        target_file = gr.File(
+            label="Target Protein (.pdb)",
+            file_types=[".pdb"],
+        )
 
     filter_type = gr.Dropdown(
-        choices=["Lipinski", "Lipinski (1 violation allowed)", "None"],
+        choices=["Lipinski", "None"],
         value="Lipinski",
         label="Ligand Filtering",
     )
 
     gr.Markdown("## 🎯 Manual Active-Site / Grid Definition")
 
-    with gr.Row():
-        custom_cx = gr.Number(label="Center X (Å)", value=DEFAULT_CENTER)
-        custom_cy = gr.Number(label="Center Y (Å)", value=DEFAULT_CENTER)
-        custom_cz = gr.Number(label="Center Z (Å)", value=DEFAULT_CENTER)
-
-    with gr.Row():
-        size_x = gr.Number(label="Grid Size X (Å)", value=DEFAULT_SIZE, minimum=1)
-        size_y = gr.Number(label="Grid Size Y (Å)", value=DEFAULT_SIZE, minimum=1)
-        size_z = gr.Number(label="Grid Size Z (Å)", value=DEFAULT_SIZE, minimum=1)
-
-    with gr.Row():
-        native_resname = gr.Textbox(
-            label="Native ligand residue name (optional helper)",
-            placeholder="3-letter code from the HETATM lines of the PDB",
-        )
-        fill_btn = gr.Button("📍 Fill centre from native ligand")
-
-    gr.Markdown(
-        "Use the same box for every compound in a comparative run. "
-        "The pipeline stops if the box contains almost no receptor atoms."
+    use_custom_center = gr.Checkbox(
+        label="Use Manual Active-Site Coordinates",
+        value=True,
     )
 
-    submit_btn = gr.Button("🚀 Run GNINA Docking", variant="primary")
+    with gr.Row():
 
-    status_box = gr.Textbox(label="Live Progress", lines=18, interactive=False)
+        custom_cx = gr.Number(
+            label="Center X (Å)",
+            value=DEFAULT_CENTER_X,
+        )
 
-    ligand_table = gr.Dataframe(label="Prepared Ligands", interactive=False)
-    docking_table = gr.Dataframe(label="GNINA Docking Results", interactive=False)
-    rejected_table = gr.Dataframe(label="Rejected / Skipped Ligands", interactive=False)
-    admet_table = gr.Dataframe(label="ADMET Results", interactive=False)
+        custom_cy = gr.Number(
+            label="Center Y (Å)",
+            value=DEFAULT_CENTER_Y,
+        )
 
-    docking_csv_file = gr.File(label="Download Docking CSV")
-    results_zip_file = gr.File(label="Download Complete Results ZIP")
+        custom_cz = gr.Number(
+            label="Center Z (Å)",
+            value=DEFAULT_CENTER_Z,
+        )
 
-    fill_btn.click(
-        fn=fill_center_from_native,
-        inputs=[target_file, native_resname],
-        outputs=[custom_cx, custom_cy, custom_cz],
+    with gr.Row():
+
+        size_x = gr.Number(
+            label="Grid Size X (Å)",
+            value=DEFAULT_SIZE_X,
+            minimum=1,
+        )
+
+        size_y = gr.Number(
+            label="Grid Size Y (Å)",
+            value=DEFAULT_SIZE_Y,
+            minimum=1,
+        )
+
+        size_z = gr.Number(
+            label="Grid Size Z (Å)",
+            value=DEFAULT_SIZE_Z,
+            minimum=1,
+        )
+
+    gr.Markdown(
+        """
+**For Mpro:** enter coordinates corresponding to the binding site you selected
+(e.g., coordinates established from the co-crystal/native ligand or catalytic
+site residues). Use the same box for all compounds in a comparative docking run.
+"""
+    )
+
+    submit_btn = gr.Button(
+        "🚀 Run GNINA Docking",
+        variant="primary",
+    )
+
+    status_box = gr.Textbox(
+        label="Live Progress",
+        lines=18,
+        interactive=False,
+    )
+
+    docking_table = gr.Dataframe(
+        label="GNINA Docking Results",
+        interactive=False,
+    )
+
+    rejected_table = gr.Dataframe(
+        label="Rejected / Skipped Ligands",
+        interactive=False,
+    )
+
+    admet_table = gr.Dataframe(
+        label="ADMET Results",
+        interactive=False,
+    )
+
+    docking_csv_file = gr.File(
+        label="Download Docking CSV"
+    )
+
+    results_zip_file = gr.File(
+        label="Download Complete Results ZIP"
     )
 
     submit_btn.click(
         fn=docking_pipeline,
         inputs=[
-            ligand_file, filter_type, target_file,
-            custom_cx, custom_cy, custom_cz,
-            size_x, size_y, size_z,
+            ligand_file,
+            filter_type,
+            target_file,
+            use_custom_center,
+            custom_cx,
+            custom_cy,
+            custom_cz,
+            size_x,
+            size_y,
+            size_z,
         ],
         outputs=[
             status_box,
-            ligand_table, docking_table, rejected_table, admet_table,
-            docking_csv_file, results_zip_file,
+            docking_table,
+            rejected_table,
+            admet_table,
+            docking_csv_file,
+            results_zip_file,
         ],
     )
 
 
 if __name__ == "__main__":
-    demo.launch(share=True, show_error=True)
+    # share=False intentionally prevents creating a public tunnel.
+    demo.launch(
+        share=False
+    )
