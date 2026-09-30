@@ -1477,7 +1477,6 @@ site residues). Use the same box for all compounds in a comparative docking run.
 
 
 if __name__ == "__main__":
-    # share=False intentionally prevents creating a public tunnel.
     demo.launch(
-        share=False
+        share=True
     )
