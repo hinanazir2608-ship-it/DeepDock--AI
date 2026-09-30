@@ -535,6 +535,26 @@ def process_ligands(ligand_file_path, filter_type="Lipinski"):
 
 
 # ============================================================
+# GNINA VERSION
+# ============================================================
+
+def get_gnina_version(gnina_exe):
+    """Return the installed GNINA version string."""
+    try:
+        result = subprocess.run(
+            [gnina_exe, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            errors="replace",
+        )
+        version = (result.stdout or result.stderr or "").strip()
+        return version if version else "Unknown"
+    except Exception as exc:
+        return f"Unknown ({exc})"
+
+
+# ============================================================
 # GNINA EXECUTABLE
 # ============================================================
 
